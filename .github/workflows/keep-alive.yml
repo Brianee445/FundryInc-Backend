@@ -1,0 +1,19 @@
+name: Keep Render Server Alive
+
+on:
+  schedule:
+    # Runs every 5 minutes. GitHub's scheduler is best-effort, not exact —
+    # under load it can slip by a few minutes, but that's still well inside
+    # Render's 15-minute free-tier spin-down window.
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab to test
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend health endpoint
+        run: |
+          curl -fsS --max-time 20 "${{ secrets.RENDER_URL }}/ping" \
+            && echo "Ping succeeded" \
+            || (echo "Ping failed" && exit 1)
