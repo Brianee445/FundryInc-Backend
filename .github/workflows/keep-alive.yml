@@ -2,16 +2,36 @@ name: Keep Render Server Alive
 
 on:
   schedule:
+    # Runs every 5 minutes. GitHub's scheduler is best-effort, not exact —
+    # under load it can slip by a few minutes, but that's still well inside
+    # Render's 15-minute free-tier spin-down window.
     - cron: "*/5 * * * *"
-  workflow_dispatch:
+  workflow_dispatch: {}  # lets you trigger it manually from the Actions tab to test
 
 jobs:
   ping:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Ping Render
+      - name: Ping backend health endpoint
         run: |
-          curl -L -fsS --max-time 20 "${{ secrets.RENDER_URL }}/ping" \
-            && echo "Ping succeeded" \
-            || { echo "Ping failed"; exit 1; }
+          if [ -z "${{ secrets.RENDER_URL }}" ]; then
+            echo "::error::RENDER_URL secret is empty or not set"
+            exit 1
+          fi
+
+          URL="${{ secrets.RENDER_URL }}/ping"
+          echo "Pinging: $URL"
+
+          HTTP_CODE=$(curl -sS --max-time 20 --retry 3 --retry-delay 5 \
+            -o response.txt -w "%{http_code}" "$URL")
+
+          echo "HTTP status: $HTTP_CODE"
+          echo "Response body:"
+          cat response.txt
+
+          if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
+            echo "Ping succeeded"
+          else
+            echo "::error::Ping failed with status $HTTP_CODE"
+            exit 1
+          fi
