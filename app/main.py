@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import waitlist
+from app.routers import waitlist, auth, founder_profiles, connections
 from app.database import engine, Base
 import uvicorn
 
@@ -21,6 +21,9 @@ app.add_middleware(
 )
 
 app.include_router(waitlist.router)
+app.include_router(auth.router)
+app.include_router(founder_profiles.router)
+app.include_router(connections.router)
 
 
 @app.get("/ping")
