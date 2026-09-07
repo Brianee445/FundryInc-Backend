@@ -40,7 +40,7 @@ on:
       zip_path:
         description: 'Path to the zip file in the repo (relative to repo root)'
         required: false
-        default: '2.zp'
+        default: '2.zip'
 
 jobs:
   apply-zip:
