@@ -1,0 +1,143 @@
+name: Apply Fix Zip
+
+# Manual trigger only - run this from the Actions tab (works fine from the
+# GitHub mobile app: Actions tab -> "Apply Fix Zip" -> Run workflow).
+#
+# WHAT THIS DOES: looks for a zip file at the repo root (default name
+# below), extracts it, and copies its contents over the repo - overwriting
+# existing files, creating new ones, at their correct paths - then commits
+# and pushes straight to main. This exists because uploading files one at a
+# time through the mobile GitHub app has been landing files in wrong paths
+# or missing them entirely; a single zip upload + one script doing the
+# extraction removes that whole failure mode.
+#
+# IMPORTANT: this workflow will NEVER touch anything under .github/ -
+# GitHub's default GITHUB_TOKEN is hard-blocked from modifying workflow
+# files (this isn't a `permissions:` setting you can grant your way around;
+# there is no "workflows" permission scope, and no combination of
+# `contents: write` etc. changes this). If the zip you upload happens to
+# contain a .github/ folder (e.g. because it's a full repo re-zip rather
+# than just the changed files), those files are deliberately skipped -
+# both when copying into the repo AND when staging the commit - so this
+# workflow can never fail on that restriction and can never silently
+# rewrite your CI/CD. If you actually need to change a workflow file,
+# that has to be done as a normal manual commit/PR, not through this tool.
+#
+# HOW TO USE:
+#   1. Upload the fix zip to the repo ROOT (not any subfolder) via the
+#      GitHub app - name it exactly "incoming-fix.zip" (or change
+#      ZIP_PATH below to match whatever you actually name it).
+#   2. Go to the Actions tab -> "Apply Fix Zip" (this workflow) ->
+#      "Run workflow" -> Run workflow (green button).
+#   3. Watch it run. On success it commits every extracted file (except
+#      .github/) to main and deletes the zip from the repo automatically.
+#   4. That push to main will itself trigger android-release.yml as
+#      normal, same as any other push.
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_path:
+        description: 'Path to the zip file in the repo (relative to repo root)'
+        required: false
+        default: '2.zp'
+
+jobs:
+  apply-zip:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify zip exists
+        run: |
+          ZIP_PATH="${{ github.event.inputs.zip_path }}"
+          if [ ! -f "$ZIP_PATH" ]; then
+            echo "❌ No file found at '$ZIP_PATH' in the repo root."
+            echo "Upload the zip there first (exact filename matters unless you set the zip_path input above), then re-run this workflow."
+            exit 1
+          fi
+          echo "✅ Found $ZIP_PATH ($(du -h "$ZIP_PATH" | cut -f1))"
+
+      - name: Extract zip
+        run: |
+          ZIP_PATH="${{ github.event.inputs.zip_path }}"
+          mkdir -p /tmp/extracted
+          unzip -o -q "$ZIP_PATH" -d /tmp/extracted
+          echo "Extracted contents:"
+          find /tmp/extracted -maxdepth 2
+
+      - name: Locate the actual project root inside the zip
+        id: locate
+        run: |
+          # Zips built from a GitHub-style "download as zip" or a manual
+          # `zip -r` of a project folder typically have one top-level
+          # directory wrapping everything (e.g. KATE_Android-main/) rather
+          # than the project files sitting directly at the zip's root.
+          # Detect that wrapper and use its contents, rather than assuming
+          # one specific folder name.
+          cd /tmp/extracted
+          TOP_LEVEL_ENTRIES=$(ls -1)
+          TOP_LEVEL_COUNT=$(echo "$TOP_LEVEL_ENTRIES" | wc -l)
+          if [ "$TOP_LEVEL_COUNT" -eq 1 ] && [ -d "$TOP_LEVEL_ENTRIES" ]; then
+            echo "Detected single wrapper folder: $TOP_LEVEL_ENTRIES"
+            echo "src_dir=/tmp/extracted/$TOP_LEVEL_ENTRIES" >> "$GITHUB_OUTPUT"
+          else
+            echo "No single wrapper folder - using extracted root directly"
+            echo "src_dir=/tmp/extracted" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Remove any .github contents from the extracted zip
+        run: |
+          # Belt-and-suspenders: strip .github/ out of the extracted
+          # payload BEFORE the sync step even runs, so there's no path by
+          # which workflow files can reach the working tree at all - not
+          # just excluded from the rsync, actually deleted from the source
+          # being synced. This is what makes the "never touch .github/"
+          # guarantee in the header comment actually true regardless of
+          # what the zip contains.
+          SRC_DIR="${{ steps.locate.outputs.src_dir }}"
+          if [ -d "$SRC_DIR/.github" ]; then
+            echo "Found .github/ in the zip - removing it before sync (see workflow header comment)."
+            rm -rf "$SRC_DIR/.github"
+          fi
+
+      - name: Copy extracted files over the repo
+        run: |
+          SRC_DIR="${{ steps.locate.outputs.src_dir }}"
+          echo "Copying from $SRC_DIR into the repo..."
+          # -a preserves structure; overwrites existing files, adds new
+          # ones. Does NOT delete files that exist in the repo but aren't
+          # in the zip - this only ever adds/overwrites, never removes,
+          # so it's safe to run even if the zip is a partial update.
+          # --exclude='.github' is redundant with the previous step now
+          # that .github/ is physically removed from SRC_DIR, but kept
+          # here anyway as a second independent guard.
+          rsync -a "$SRC_DIR"/ "$GITHUB_WORKSPACE"/ --exclude='.git' --exclude='.github'
+
+      - name: Remove the zip from the repo
+        run: |
+          ZIP_PATH="${{ github.event.inputs.zip_path }}"
+          rm -f "$ZIP_PATH"
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Explicitly excludes .github from staging as a third independent
+          # guard - even if something upstream of this step ever
+          # reintroduced a change under .github/ (e.g. a future edit to
+          # this workflow that removes one of the earlier guards), `git
+          # add -A` would still stage it unless this stays scoped. Staging
+          # everything EXCEPT .github by pathspec exclusion:
+          git add -A -- . ':!.github'
+          if git diff --cached --quiet; then
+            echo "Nothing changed - zip contents already matched the repo."
+          else
+            git commit -m "Apply fix zip via Apply Fix Zip workflow"
+            git push origin HEAD:main
+            echo "✅ Pushed to main."
+          fi
