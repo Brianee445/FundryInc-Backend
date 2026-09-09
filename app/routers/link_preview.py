@@ -1,4 +1,5 @@
 import re
+from urllib.parse import urljoin
 
 import requests
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -54,10 +55,19 @@ def get_link_preview(
     tags = _extract_og_tags(html)
     title_match = _TITLE_TAG_RE.search(html)
 
+    # Sites frequently set og:image to a path relative to their own domain
+    # (e.g. "/og-image.png") rather than an absolute URL. Left as-is, that
+    # string is meaningless to the frontend's <img src>, which resolves it
+    # relative to *our* app's origin — producing a broken image. Resolve
+    # against response.url (the final URL after any redirects) so the
+    # frontend always gets something loadable.
+    raw_image = tags.get("og:image") or tags.get("twitter:image")
+    image = urljoin(response.url, raw_image) if raw_image else None
+
     return LinkPreviewResponse(
         url=url,
         title=tags.get("og:title") or (title_match.group("value").strip() if title_match else None),
         description=tags.get("og:description") or tags.get("description"),
-        image=tags.get("og:image") or tags.get("twitter:image"),
+        image=image,
         site_name=tags.get("og:site_name"),
     )
