@@ -20,6 +20,16 @@ class Settings(BaseSettings):
     # token issued for a different app can never be replayed against this API.
     google_client_id: str = ""
 
+    # Supabase Storage — used for founder profile picture / gallery / demo
+    # video uploads (app/routers/media.py). The service role key is used
+    # server-side only (never sent to the frontend) so uploads work
+    # regardless of Storage RLS policies; this backend does its own auth
+    # via require_role("founder"), so bypassing RLS here is intentional,
+    # not a shortcut around access control.
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    supabase_storage_bucket: str = "founder-media"
+
     class Config:
         env_file = ".env"
         # Field names above are lower_snake_case; environment variables are

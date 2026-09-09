@@ -77,7 +77,17 @@ class FounderProfileUpsert(BaseModel):
     location_city: Optional[str] = None
     pitch_deck_url: Optional[str] = None
     demo_video_url: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    gallery_image_urls: list[str] = []
+    startup_link: Optional[str] = None
     contact_visibility: Literal["private", "public"] = "private"
+
+    @field_validator("gallery_image_urls")
+    @classmethod
+    def max_six_gallery_images(cls, value: list[str]) -> list[str]:
+        if len(value) > 6:
+            raise ValueError("Up to 6 gallery images allowed")
+        return value
 
     @field_validator("funding_ask_max")
     @classmethod
@@ -108,6 +118,9 @@ class FounderProfileResponse(BaseModel):
     location_city: Optional[str]
     pitch_deck_url: Optional[str]
     demo_video_url: Optional[str]
+    profile_picture_url: Optional[str] = None
+    gallery_image_urls: list[str] = []
+    startup_link: Optional[str] = None
     contact_visibility: str
     verification_tier: str
     published: bool
@@ -143,3 +156,46 @@ class ConnectionRequestResponse(BaseModel):
     investor_email: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class MessageCreate(BaseModel):
+    body: str
+
+    @field_validator("body")
+    @classmethod
+    def body_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Message cannot be empty")
+        if len(value) > 4000:
+            raise ValueError("Message is too long (4000 character max)")
+        return value
+
+
+class MessageResponse(BaseModel):
+    id: uuid.UUID
+    connection_id: uuid.UUID
+    sender_id: uuid.UUID
+    body: str
+    created_at: datetime
+    read_at: Optional[datetime]
+    # Set by the router relative to the requesting user — not a stored column.
+    is_mine: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class MessageThreadResponse(BaseModel):
+    connection_id: uuid.UUID
+    counterparty_label: str
+    last_message: Optional[str] = None
+    last_message_at: Optional[datetime] = None
+    unread_count: int = 0
+
+
+class LinkPreviewResponse(BaseModel):
+    url: str
+    title: Optional[str] = None
+    description: Optional[str] = None
+    image: Optional[str] = None
+    site_name: Optional[str] = None

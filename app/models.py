@@ -12,7 +12,7 @@ from sqlalchemy import (
     Numeric,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.database import Base
@@ -115,6 +115,9 @@ class FounderProfile(Base):
     location_city = Column(String, nullable=True)
     pitch_deck_url = Column(String, nullable=True)
     demo_video_url = Column(String, nullable=True)
+    profile_picture_url = Column(String, nullable=True)
+    gallery_image_urls = Column(ARRAY(String), nullable=False, default=list)
+    startup_link = Column(String, nullable=True)
 
     # Founder's choice, off by default per PRD 3.4 — contact stays gated
     # behind an accepted connection request unless they opt in here.
@@ -160,6 +163,28 @@ class ConnectionRequest(Base):
         # prevents spamming the same founder with repeat requests.
         UniqueConstraint("investor_id", "founder_profile_id", name="uq_connection_investor_founder"),
     )
+
+
+class Message(Base):
+    """
+    In-platform chat, scoped to a single ConnectionRequest. Only exists —
+    and is only ever readable/writable — once that connection is accepted,
+    per PRD 3.4's "early conversation without exposing personal contact
+    info immediately" safety layer. Enforced in routers/messages.py, not
+    here (this table has no independent notion of who's allowed to see it).
+    """
+
+    __tablename__ = "messages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    connection_id = Column(UUID(as_uuid=True), ForeignKey("connection_requests.id"), nullable=False, index=True)
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    body = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    read_at = Column(DateTime(timezone=True), nullable=True)
+
+    connection = relationship("ConnectionRequest")
+    sender = relationship("User")
 
 
 class SavedFounderProfile(Base):
