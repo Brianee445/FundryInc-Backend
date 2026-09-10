@@ -9,11 +9,12 @@ from app.models import (
     ConnectionStatusEnum,
     ConnectionRequest,
     FounderProfile,
+    FounderProfileView,
     SavedFounderProfile,
     StageEnum,
     User,
 )
-from app.schemas import FounderContactInfo, FounderProfileResponse, FounderProfileUpsert
+from app.schemas import FounderContactInfo, FounderProfileResponse, FounderProfileUpsert, SpotlightUpdate
 
 router = APIRouter(prefix="/api/v1/founder-profiles", tags=["Founder Profiles"])
 
@@ -158,6 +159,51 @@ def list_saved_profiles(
     return [_attach_contact_if_visible(profile, current_user, db) for profile in saved]
 
 
+@router.get("/spotlight/current", response_model=Optional[FounderProfileResponse])
+def get_current_spotlight(db: Session = Depends(get_db)):
+    """
+    Public — powers the marketing site's Spotlight section (PRD 3.5).
+    Returns null when no founder is currently spotlighted rather than
+    erroring, so the frontend can fall back to a placeholder instead of
+    treating "nobody's spotlighted yet" as a failure.
+    """
+    profile = (
+        db.query(FounderProfile)
+        .filter(FounderProfile.is_spotlighted.is_(True), FounderProfile.published.is_(True))
+        .order_by(FounderProfile.updated_at.desc())
+        .first()
+    )
+    if profile is None:
+        return None
+    return _attach_contact_if_visible(profile, None, db)
+
+
+@router.patch("/{profile_id}/spotlight", response_model=FounderProfileResponse)
+def set_spotlight(
+    profile_id: str,
+    payload: SpotlightUpdate,
+    current_user: User = Depends(require_role("admin")),
+    db: Session = Depends(get_db),
+):
+    """
+    Admin-only. Only one founder is spotlighted at a time — setting this
+    profile's flag true clears it on every other profile first, so the
+    frontend never has to pick among several.
+    """
+    profile = db.query(FounderProfile).filter(FounderProfile.id == profile_id).first()
+    if profile is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
+
+    if payload.is_spotlighted:
+        db.query(FounderProfile).filter(FounderProfile.id != profile_id).update(
+            {"is_spotlighted": False}, synchronize_session=False
+        )
+    profile.is_spotlighted = payload.is_spotlighted
+    db.commit()
+    db.refresh(profile)
+    return _attach_contact_if_visible(profile, current_user, db)
+
+
 @router.get("/{profile_id}", response_model=FounderProfileResponse)
 def get_founder_profile(
     profile_id: str,
@@ -168,6 +214,11 @@ def get_founder_profile(
     is_owner = current_user is not None and profile is not None and current_user.id == profile.user_id
     if profile is None or (not profile.published and not is_owner):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
+
+    if not is_owner:
+        db.add(FounderProfileView(founder_profile_id=profile.id, viewer_id=current_user.id if current_user else None))
+        db.commit()
+
     return _attach_contact_if_visible(profile, current_user, db)
 
 

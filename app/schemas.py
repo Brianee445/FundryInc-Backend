@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, EmailStr, ConfigDict, field_validator
 from typing import Literal, Optional
@@ -124,6 +124,7 @@ class FounderProfileResponse(BaseModel):
     contact_visibility: str
     verification_tier: str
     published: bool
+    is_spotlighted: bool = False
     created_at: datetime
     # Populated by the router, not the ORM object directly — see
     # routers/founder_profiles.py for when this is (and isn't) attached.
@@ -199,3 +200,34 @@ class LinkPreviewResponse(BaseModel):
     description: Optional[str] = None
     image: Optional[str] = None
     site_name: Optional[str] = None
+
+
+class SpotlightUpdate(BaseModel):
+    is_spotlighted: bool
+
+
+class DailyCount(BaseModel):
+    date: date
+    count: int
+
+
+class FounderAnalyticsResponse(BaseModel):
+    profile_views_total: int
+    profile_views_daily: list[DailyCount]
+    connection_requests_total: int
+    connection_requests_pending: int
+    connection_requests_accepted: int
+    connection_requests_declined: int
+    connection_requests_daily: list[DailyCount]
+    saved_by_investors_count: int
+    messages_total: int
+
+
+class InvestorAnalyticsResponse(BaseModel):
+    connection_requests_sent_total: int
+    connection_requests_pending: int
+    connection_requests_accepted: int
+    connection_requests_declined: int
+    connection_requests_daily: list[DailyCount]
+    saved_founders_count: int
+    messages_total: int

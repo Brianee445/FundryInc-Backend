@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers import waitlist, auth, founder_profiles, connections, messages, link_preview, media
+from app.routers import waitlist, auth, founder_profiles, connections, messages, link_preview, media, analytics
 from app.database import engine, Base
 import uvicorn
 
@@ -27,6 +27,7 @@ app.include_router(connections.router)
 app.include_router(messages.router)
 app.include_router(link_preview.router)
 app.include_router(media.router)
+app.include_router(analytics.router)
 
 
 @app.get("/ping")

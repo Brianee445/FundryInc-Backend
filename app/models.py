@@ -124,6 +124,12 @@ class FounderProfile(Base):
     contact_visibility = Column(String, nullable=False, default="private")
     verification_tier = Column(Enum(VerificationTierEnum), nullable=False, default=VerificationTierEnum.basic)
     published = Column(Boolean, nullable=False, default=False)
+    # Per PRD 3.5 (Founder Interview/Spotlight Program). Admin-set only —
+    # see require_role("admin") on PATCH /{id}/spotlight in
+    # routers/founder_profiles.py. No self-nomination workflow yet; that's
+    # the "applications go into an admin review queue" piece of 3.5, which
+    # is a bigger, separate admin-panel build.
+    is_spotlighted = Column(Boolean, nullable=False, default=False)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -185,6 +191,23 @@ class Message(Base):
 
     connection = relationship("ConnectionRequest")
     sender = relationship("User")
+
+
+class FounderProfileView(Base):
+    """
+    One row per profile view — powers the founder-side analytics chart
+    (PRD 7: 'success metrics' needs *some* engagement signal, and profile
+    views are the simplest one that doesn't need new user-facing UI).
+    Written from GET /founder-profiles/{id} in routers/founder_profiles.py,
+    skipped when the viewer is the profile's own owner.
+    """
+
+    __tablename__ = "founder_profile_views"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    founder_profile_id = Column(UUID(as_uuid=True), ForeignKey("founder_profiles.id"), nullable=False, index=True)
+    viewer_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
 
 
 class SavedFounderProfile(Base):
