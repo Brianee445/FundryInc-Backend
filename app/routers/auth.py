@@ -1,3 +1,5 @@
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,21 @@ from app.security import (
 )
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
+
+
+def _issue_token(user: User, db: Session) -> str:
+    """
+    Starts a fresh session for this user and returns the signed token for
+    it. Generating a new session_id here — and saving it as the user's
+    *only* valid one — is what makes single-device enforcement work: any
+    token issued by an earlier login now has a stale "sid" and will be
+    rejected by get_current_user the next time it's used, forcing that
+    other device to log out.
+    """
+    session_id = uuid.uuid4()
+    user.current_session_id = session_id
+    db.commit()
+    return create_access_token(subject=str(user.id), role=user.role.value, session_id=str(session_id))
 
 
 @router.post("/signup", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
@@ -35,7 +52,7 @@ def signup(payload: SignupRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    token = create_access_token(subject=str(user.id), role=user.role.value)
+    token = _issue_token(user, db)
     return TokenResponse(access_token=token, user=UserResponse.model_validate(user))
 
 
@@ -62,7 +79,7 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
             detail="This account is not active. Contact support for help.",
         )
 
-    token = create_access_token(subject=str(user.id), role=user.role.value)
+    token = _issue_token(user, db)
     return TokenResponse(access_token=token, user=UserResponse.model_validate(user))
 
 
@@ -98,7 +115,7 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
                 detail="This account is not active. Contact support for help.",
             )
 
-        token = create_access_token(subject=str(user.id), role=user.role.value)
+        token = _issue_token(user, db)
         return TokenResponse(access_token=token, user=UserResponse.model_validate(user))
 
     # No existing account — this is a first-time Google sign-in, which is
@@ -120,7 +137,7 @@ def google_auth(payload: GoogleAuthRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
-    token = create_access_token(subject=str(user.id), role=user.role.value)
+    token = _issue_token(user, db)
     return TokenResponse(access_token=token, user=UserResponse.model_validate(user))
 
 

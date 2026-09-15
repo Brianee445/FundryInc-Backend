@@ -163,10 +163,17 @@ def list_threads(
             if current_user.role == "investor"
             else connection.investor.email
         )
+        # Investors have no profile/avatar concept in this app yet, so a
+        # founder's thread list always falls back to initials — only the
+        # investor's side has a real image to show.
+        avatar_url = (
+            connection.founder_profile.profile_picture_url if current_user.role == "investor" else None
+        )
 
         thread = MessageThreadResponse(
             connection_id=connection.id,
             counterparty_label=label,
+            counterparty_avatar_url=avatar_url,
             last_message=last_message.body if last_message else None,
             last_message_at=last_message.created_at if last_message else None,
             unread_count=unread_count,

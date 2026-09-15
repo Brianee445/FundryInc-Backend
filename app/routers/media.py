@@ -36,5 +36,6 @@ async def upload_media(
         kind=kind,
         content_type=file.content_type or "application/octet-stream",
         data=data,
+        filename=file.filename,
     )
     return MediaUploadResponse(url=url)

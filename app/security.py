@@ -20,18 +20,23 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
     return _pwd_context.verify(plain_password, hashed_password)
 
 
-def create_access_token(subject: str, role: str) -> str:
+def create_access_token(subject: str, role: str, session_id: str) -> str:
     """
     Build a signed JWT for a logged-in user.
 
     `subject` is the user's id (kept as a string per JWT convention — the
     "sub" claim). `role` is embedded directly in the token so the API can
     authorize a request without a database round trip on every call.
+    `session_id` ("sid") is what makes single-device enforcement possible —
+    see User.current_session_id in models.py and get_current_user in
+    dependencies.py, which rejects any token whose "sid" doesn't match the
+    user's current value (i.e. a newer login happened elsewhere since this
+    token was issued).
     """
     expire_at = datetime.now(timezone.utc) + timedelta(
         minutes=settings.access_token_expire_minutes
     )
-    payload = {"sub": subject, "role": role, "exp": expire_at}
+    payload = {"sub": subject, "role": role, "sid": session_id, "exp": expire_at}
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 

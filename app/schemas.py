@@ -57,6 +57,7 @@ class TokenResponse(BaseModel):
 
 
 StageLiteral = Literal["idea", "preseed", "seed", "series_a", "series_b_plus"]
+InvestorTypeLiteral = Literal["angel", "vc", "fund", "family_office", "other"]
 
 
 class FounderProfileUpsert(BaseModel):
@@ -139,6 +140,14 @@ class ConnectionRequestCreate(BaseModel):
     message: Optional[str] = None
 
 
+class ConnectionRequestCreateToInvestor(BaseModel):
+    """Founder-initiated — the mirror of ConnectionRequestCreate. See
+    POST /connections/to-investor in routers/connections.py."""
+
+    investor_user_id: uuid.UUID
+    message: Optional[str] = None
+
+
 class ConnectionRequestDecision(BaseModel):
     status: Literal["accepted", "declined"]
 
@@ -147,6 +156,7 @@ class ConnectionRequestResponse(BaseModel):
     id: uuid.UUID
     investor_id: uuid.UUID
     founder_profile_id: uuid.UUID
+    initiator: str
     message: Optional[str]
     status: str
     contact_revealed_at: Optional[datetime]
@@ -155,6 +165,66 @@ class ConnectionRequestResponse(BaseModel):
     # request just to show who/what a connection request is about.
     startup_name: Optional[str] = None
     investor_email: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InvestorProfileUpsert(BaseModel):
+    """Used for both create and update, same pattern as FounderProfileUpsert
+    — one profile per investor, so a single upsert route rather than
+    separate create/update endpoints."""
+
+    investor_type: InvestorTypeLiteral = "angel"
+    firm_name: Optional[str] = None
+    bio: Optional[str] = None
+    check_size_min: Optional[float] = None
+    check_size_max: Optional[float] = None
+    sectors_of_interest: list[str] = []
+    geographies_of_interest: list[str] = []
+    profile_picture_url: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    contact_visibility: Literal["private", "public"] = "private"
+
+    @field_validator("sectors_of_interest", "geographies_of_interest")
+    @classmethod
+    def max_ten_tags(cls, value: list[str]) -> list[str]:
+        if len(value) > 10:
+            raise ValueError("Up to 10 entries allowed")
+        return value
+
+    @field_validator("check_size_max")
+    @classmethod
+    def max_not_less_than_min(cls, value: Optional[float], info) -> Optional[float]:
+        check_min = info.data.get("check_size_min")
+        if value is not None and check_min is not None and value < check_min:
+            raise ValueError("Maximum check size cannot be less than minimum")
+        return value
+
+
+class InvestorContactInfo(BaseModel):
+    """Only ever included once a connection request has been accepted, or the investor has made it public."""
+
+    email: EmailStr
+
+
+class InvestorProfileResponse(BaseModel):
+    id: uuid.UUID
+    user_id: uuid.UUID
+    investor_type: str
+    firm_name: Optional[str]
+    bio: Optional[str]
+    check_size_min: Optional[float]
+    check_size_max: Optional[float]
+    sectors_of_interest: list[str] = []
+    geographies_of_interest: list[str] = []
+    profile_picture_url: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    contact_visibility: str
+    published: bool
+    created_at: datetime
+    # Populated by the router, not the ORM object directly — see
+    # routers/investor_profiles.py for when this is (and isn't) attached.
+    contact: Optional[InvestorContactInfo] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -189,6 +259,7 @@ class MessageResponse(BaseModel):
 class MessageThreadResponse(BaseModel):
     connection_id: uuid.UUID
     counterparty_label: str
+    counterparty_avatar_url: Optional[str] = None
     last_message: Optional[str] = None
     last_message_at: Optional[datetime] = None
     unread_count: int = 0

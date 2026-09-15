@@ -42,6 +42,22 @@ def get_current_user(
     if user is None:
         raise credentials_error
 
+    # Single-device enforcement: a newer login (this device or another one)
+    # overwrites current_session_id, which immediately invalidates every
+    # token issued before it — including one still sitting in another
+    # browser's storage. `current_session_id is not None` guards the one
+    # legitimate case where they *should* still match trivially: a token
+    # issued before this feature shipped, for a user who hasn't logged in
+    # again since (their column is still NULL) — don't force an unrelated
+    # mass logout on deploy day.
+    token_session_id = payload.get("sid")
+    if user.current_session_id is not None and str(user.current_session_id) != token_session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Your account was signed in on another device.",
+            headers={"WWW-Authenticate": "Bearer", "X-Session-Superseded": "true"},
+        )
+
     return user
 
 
@@ -67,7 +83,18 @@ def get_current_user_optional(
     user_id = payload.get("sub")
     if user_id is None:
         return None
-    return db.query(User).filter(User.id == user_id).first()
+    user = db.query(User).filter(User.id == user_id).first()
+    if user is None:
+        return None
+
+    token_session_id = payload.get("sid")
+    if user.current_session_id is not None and str(user.current_session_id) != token_session_id:
+        # Same "signed in elsewhere" case as get_current_user, but this is
+        # the optional variant (public routes) — treat it as simply logged
+        # out rather than raising, same as any other invalid token here.
+        return None
+
+    return user
 
 
 def require_role(*allowed_roles: str):

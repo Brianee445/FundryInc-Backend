@@ -73,10 +73,19 @@ class User(Base):
     google_sub = Column(String, unique=True, index=True, nullable=True)
     role = Column(Enum(UserRoleEnum), nullable=False)
     status = Column(Enum(UserStatusEnum), nullable=False, default=UserStatusEnum.active)
+    # Security requirement: only one device/browser may be signed in at a
+    # time. Every login/signup generates a fresh value here and embeds it in
+    # the issued JWT's "sid" claim; get_current_user (dependencies.py)
+    # rejects any token whose "sid" doesn't match the current value, which
+    # is exactly what "logged in elsewhere" needs — a stateless JWT alone
+    # can't be invalidated early, so this one stateful field is what makes
+    # that possible without a full session-store rewrite.
+    current_session_id = Column(UUID(as_uuid=True), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     founder_profile = relationship("FounderProfile", back_populates="user", uselist=False)
+    investor_profile = relationship("InvestorProfile", back_populates="user", uselist=False)
 
 
 class StageEnum(str, enum.Enum):
@@ -137,16 +146,71 @@ class FounderProfile(Base):
     user = relationship("User", back_populates="founder_profile")
 
 
+class InvestorTypeEnum(str, enum.Enum):
+    angel = "angel"
+    vc = "vc"
+    fund = "fund"
+    family_office = "family_office"
+    other = "other"
+
+
+class InvestorProfile(Base):
+    """
+    One-to-one with an investor User. Mirrors FounderProfile — per PRD 2.2's
+    investor onboarding fields (investor type, check size range, sectors/
+    geographies of interest), which were captured as onboarding questions
+    in the PRD but never actually got a profile model until now. Lets
+    founders discover and pitch investors the same way investors discover
+    founders (previously one-directional only).
+    """
+
+    __tablename__ = "investor_profiles"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False)
+
+    investor_type = Column(Enum(InvestorTypeEnum), nullable=False, default=InvestorTypeEnum.angel)
+    firm_name = Column(String, nullable=True)
+    bio = Column(Text, nullable=True)
+    check_size_min = Column(Numeric(14, 2), nullable=True)
+    check_size_max = Column(Numeric(14, 2), nullable=True)
+    sectors_of_interest = Column(ARRAY(String), nullable=False, default=list)
+    geographies_of_interest = Column(ARRAY(String), nullable=False, default=list)
+    profile_picture_url = Column(String, nullable=True)
+    linkedin_url = Column(String, nullable=True)
+
+    # Same opt-in-visibility pattern as FounderProfile.published — an
+    # investor profile a founder can browse only exists once this is true.
+    # This *is* the consent mechanism discussed for this feature: nothing
+    # about an investor is discoverable until they choose to publish.
+    published = Column(Boolean, nullable=False, default=False)
+    # Same gating pattern as FounderProfile.contact_visibility.
+    contact_visibility = Column(String, nullable=False, default="private")
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    user = relationship("User", back_populates="investor_profile")
+
+
 class ConnectionStatusEnum(str, enum.Enum):
     pending = "pending"
     accepted = "accepted"
     declined = "declined"
 
 
+class ConnectionInitiatorEnum(str, enum.Enum):
+    investor = "investor"
+    founder = "founder"
+
+
 class ConnectionRequest(Base):
     """
-    An investor's request to connect with a founder. Per PRD 3.4: contact
-    details only become visible to the investor once the founder accepts.
+    A connection request between one investor and one founder. Originally
+    investor-initiated only (per PRD 3.4); `initiator` now tracks which
+    side started it, since founders can also pitch investors. Whichever
+    side did *not* initiate is the one who must accept/decline — enforced
+    in routers/connections.py, not here.
     """
 
     __tablename__ = "connection_requests"
@@ -154,6 +218,13 @@ class ConnectionRequest(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
     investor_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     founder_profile_id = Column(UUID(as_uuid=True), ForeignKey("founder_profiles.id"), nullable=False)
+    # Plain string rather than a native Postgres enum, deliberately — this
+    # column is being added to an *existing* table via a manual ALTER
+    # (migration_add_bidirectional_connections.sql), and matching the
+    # convention contact_visibility already uses elsewhere in this file
+    # avoids having to also CREATE TYPE a matching native enum in that
+    # migration for a column this low-stakes.
+    initiator = Column(String, nullable=False, default=ConnectionInitiatorEnum.investor.value)
     message = Column(Text, nullable=True)
     status = Column(Enum(ConnectionStatusEnum), nullable=False, default=ConnectionStatusEnum.pending)
     contact_revealed_at = Column(DateTime(timezone=True), nullable=True)
@@ -165,8 +236,9 @@ class ConnectionRequest(Base):
     founder_profile = relationship("FounderProfile")
 
     __table_args__ = (
-        # An investor can only have one open request per founder profile —
-        # prevents spamming the same founder with repeat requests.
+        # One open request per investor-founder pair, regardless of which
+        # side initiated it — prevents either side from spamming repeat
+        # requests at the same counterparty.
         UniqueConstraint("investor_id", "founder_profile_id", name="uq_connection_investor_founder"),
     )
 
