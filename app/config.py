@@ -30,6 +30,24 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_storage_bucket: str = "founder-media"
 
+    # Bachs (payments/billing). Sandbox first: sk_sandbox_ key against
+    # https://sandbox-api.bachs.io. Swap to sk_live_ + https://api.bachs.io
+    # to go live — see app/services/bachs.py.
+    bachs_api_key: str = ""
+    bachs_api_base_url: str = "https://sandbox-api.bachs.io"
+    bachs_webhook_secret: str = ""
+    # The Bachs product_id for the recurring "Founder Premium" (gold
+    # verification) plan. Monthly and annual are two separate Bachs
+    # products (different prices/intervals), not one product with a
+    # parameter — create both in the Bachs dashboard and paste the ids here.
+    bachs_premium_monthly_product_id: str = ""
+    bachs_premium_annual_product_id: str = ""
+    # Where Bachs' hosted checkout redirects the browser after payment.
+    # Fulfilment itself never depends on this — only the webhook does —
+    # this is purely for UX (what the user sees after paying).
+    frontend_billing_return_url: str = "http://localhost:3000/billing?billing=success"
+    frontend_billing_cancel_url: str = "http://localhost:3000/billing?billing=cancelled"
+
     class Config:
         env_file = ".env"
         # Field names above are lower_snake_case; environment variables are

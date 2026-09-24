@@ -297,3 +297,70 @@ class SavedFounderProfile(Base):
     __table_args__ = (
         UniqueConstraint("investor_id", "founder_profile_id", name="uq_saved_investor_founder"),
     )
+
+
+class SubscriptionPlanEnum(str, enum.Enum):
+    monthly = "monthly"
+    annual = "annual"
+
+
+class SubscriptionStatusEnum(str, enum.Enum):
+    active = "active"
+    past_due = "past_due"
+    canceled = "canceled"
+
+
+class FounderSubscription(Base):
+    """
+    One row per founder's premium (gold "Business Verified" tier)
+    subscription via Bachs. verification_tier on FounderProfile is the
+    fast-path flag the rest of the app reads; this table is the billing
+    system of record behind it — created/updated only from the Bachs
+    webhook in app/routers/billing.py, never optimistically from the
+    checkout redirect (per Bachs' own guidance: webhooks are the source
+    of truth for fulfilment).
+    """
+
+    __tablename__ = "founder_subscriptions"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    founder_profile_id = Column(UUID(as_uuid=True), ForeignKey("founder_profiles.id"), unique=True, nullable=False)
+
+    plan = Column(Enum(SubscriptionPlanEnum), nullable=False)
+    status = Column(Enum(SubscriptionStatusEnum), nullable=False, default=SubscriptionStatusEnum.active)
+
+    # Bachs-side identifiers — sub_..., cust_..., chk_... — kept so we can
+    # look up or cancel the subscription later and so webhook events (which
+    # carry these ids, not our own) can be matched back to this row.
+    bachs_subscription_id = Column(String, nullable=True, index=True)
+    bachs_customer_id = Column(String, nullable=True)
+    bachs_checkout_session_id = Column(String, nullable=True)
+
+    currency = Column(String, nullable=False, default="NGN")
+    amount = Column(Numeric(14, 2), nullable=True)
+
+    current_period_end = Column(DateTime(timezone=True), nullable=True)
+    canceled_at = Column(DateTime(timezone=True), nullable=True)
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    founder_profile = relationship("FounderProfile")
+
+
+class BillingEvent(Base):
+    """
+    Raw log of every webhook event we've processed, keyed by Bachs' own
+    event id. Two things this buys us: an idempotency check (Bachs, like
+    most webhook senders, can redeliver the same event — see
+    routers/billing.py's webhook handler checking this table first) and an
+    audit trail if a payment dispute ever needs investigating.
+    """
+
+    __tablename__ = "billing_events"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    bachs_event_id = Column(String, unique=True, nullable=False, index=True)
+    event_type = Column(String, nullable=False)
+    payload = Column(Text, nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

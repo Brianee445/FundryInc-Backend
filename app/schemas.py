@@ -302,3 +302,18 @@ class InvestorAnalyticsResponse(BaseModel):
     connection_requests_daily: list[DailyCount]
     saved_founders_count: int
     messages_total: int
+
+
+class CheckoutRequest(BaseModel):
+    plan: Literal["monthly", "annual"]
+
+
+class CheckoutResponse(BaseModel):
+    checkout_url: str
+
+
+class SubscriptionStatusResponse(BaseModel):
+    verification_tier: str
+    plan: Optional[str] = None
+    status: Optional[str] = None
+    current_period_end: Optional[datetime] = None
