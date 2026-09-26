@@ -220,6 +220,7 @@ class InvestorProfileResponse(BaseModel):
     profile_picture_url: Optional[str] = None
     linkedin_url: Optional[str] = None
     contact_visibility: str
+    verification_tier: str
     published: bool
     created_at: datetime
     # Populated by the router, not the ORM object directly — see
@@ -305,7 +306,8 @@ class InvestorAnalyticsResponse(BaseModel):
 
 
 class CheckoutRequest(BaseModel):
-    plan: Literal["monthly", "annual"]
+    tier: Literal["basic", "premium"]
+    interval: Literal["monthly", "annual"]
 
 
 class CheckoutResponse(BaseModel):
@@ -314,6 +316,7 @@ class CheckoutResponse(BaseModel):
 
 class SubscriptionStatusResponse(BaseModel):
     verification_tier: str
-    plan: Optional[str] = None
+    tier: Optional[str] = None
+    interval: Optional[str] = None
     status: Optional[str] = None
     current_period_end: Optional[datetime] = None

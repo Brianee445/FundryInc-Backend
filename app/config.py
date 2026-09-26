@@ -40,8 +40,19 @@ class Settings(BaseSettings):
     # verification) plan. Monthly and annual are two separate Bachs
     # products (different prices/intervals), not one product with a
     # parameter — create both in the Bachs dashboard and paste the ids here.
-    bachs_premium_monthly_product_id: str = ""
-    bachs_premium_annual_product_id: str = ""
+    # Bachs product_ids for each paid (tier, interval) combination, per
+    # role. starter is free and has no product id. Create all 8 recurring
+    # products in the Bachs dashboard first (₦3,000/mo & ₦30,000/yr basic,
+    # ₦5,000/mo & ₦50,000/yr premium — annual = 10x monthly per plan — for
+    # both founders and investors), then paste their prod_... ids below.
+    bachs_founder_basic_monthly_product_id: str = ""
+    bachs_founder_basic_annual_product_id: str = ""
+    bachs_founder_premium_monthly_product_id: str = ""
+    bachs_founder_premium_annual_product_id: str = ""
+    bachs_investor_basic_monthly_product_id: str = ""
+    bachs_investor_basic_annual_product_id: str = ""
+    bachs_investor_premium_monthly_product_id: str = ""
+    bachs_investor_premium_annual_product_id: str = ""
     # Where Bachs' hosted checkout redirects the browser after payment.
     # Fulfilment itself never depends on this — only the webhook does —
     # this is purely for UX (what the user sees after paying).

@@ -1,19 +1,21 @@
 """
-Founder premium billing via Bachs.
+Paid verification tiers via Bachs, for both founders and investors.
+
+Tiers: starter (free, default) -> basic -> premium. starter never has a
+subscription row; basic/premium do, one per profile, tracked in
+FounderSubscription / InvestorSubscription depending on the caller's role.
 
 Flow:
-  1. Founder hits POST /api/v1/billing/checkout -> we create a Bachs
-     checkout session against the recurring premium product and return
+  1. POST /api/v1/billing/checkout {tier, interval} -> creates a Bachs
+     checkout session against the matching recurring product and returns
      the hosted checkout URL. Frontend redirects the browser there.
-  2. Founder pays on Bachs' hosted page. Bachs redirects back to
-     frontend_billing_return_url — that redirect is UX only, it never
-     grants premium by itself.
+  2. User pays on Bachs' hosted page. Bachs redirects back to
+     frontend_billing_return_url — UX only, never grants the tier itself.
   3. Bachs POSTs collection.succeeded (and later invoice.paid on renewal,
      subscription.canceled on cancellation) to
      POST /api/v1/billing/webhook. That webhook is the only thing that
-     ever upgrades verification_tier — per Bachs' own guidance, webhooks
-     are the source of truth for fulfilment, never the client-side
-     redirect.
+     ever changes verification_tier — per Bachs' own guidance, webhooks
+     are the source of truth for fulfilment, never the client redirect.
 """
 
 import json
@@ -24,12 +26,14 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
-from app.dependencies import require_role
+from app.dependencies import get_current_user
 from app.models import (
     BillingEvent,
+    BillingIntervalEnum,
     FounderProfile,
     FounderSubscription,
-    SubscriptionPlanEnum,
+    InvestorProfile,
+    InvestorSubscription,
     SubscriptionStatusEnum,
     User,
     VerificationTierEnum,
@@ -40,36 +44,69 @@ from app.services.webhook_verify import verify_signature
 
 router = APIRouter(prefix="/api/v1/billing", tags=["Billing"])
 
+# (role, tier, interval) -> settings attribute name. starter is free and
+# deliberately absent — there is no checkout for it.
+_PRODUCT_ID_SETTINGS = {
+    ("founder", "basic", "monthly"): "bachs_founder_basic_monthly_product_id",
+    ("founder", "basic", "annual"): "bachs_founder_basic_annual_product_id",
+    ("founder", "premium", "monthly"): "bachs_founder_premium_monthly_product_id",
+    ("founder", "premium", "annual"): "bachs_founder_premium_annual_product_id",
+    ("investor", "basic", "monthly"): "bachs_investor_basic_monthly_product_id",
+    ("investor", "basic", "annual"): "bachs_investor_basic_annual_product_id",
+    ("investor", "premium", "monthly"): "bachs_investor_premium_monthly_product_id",
+    ("investor", "premium", "annual"): "bachs_investor_premium_annual_product_id",
+}
 
-def _product_id_for_plan(plan: str) -> str:
-    if plan == SubscriptionPlanEnum.annual.value:
-        return settings.bachs_premium_annual_product_id
-    return settings.bachs_premium_monthly_product_id
+
+def _product_id(role: str, tier: str, interval: str) -> str:
+    attr = _PRODUCT_ID_SETTINGS.get((role, tier, interval))
+    return getattr(settings, attr, "") if attr else ""
+
+
+def _get_profile(current_user: User, db: Session):
+    """Returns (role, profile) for whichever profile type this user has."""
+    if current_user.role == "founder":
+        profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
+        return "founder", profile
+    if current_user.role == "investor":
+        profile = db.query(InvestorProfile).filter(InvestorProfile.user_id == current_user.id).first()
+        return "investor", profile
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Billing is only available to founders and investors.")
+
+
+def _subscription_model(role: str):
+    return FounderSubscription if role == "founder" else InvestorSubscription
+
+
+def _subscription_fk_field(role: str):
+    return "founder_profile_id" if role == "founder" else "investor_profile_id"
 
 
 @router.post("/checkout", response_model=CheckoutResponse)
 def create_checkout(
     payload: CheckoutRequest,
-    current_user: User = Depends(require_role("founder")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Founder-only. Starts a Bachs checkout for the premium (gold) verification plan."""
-    profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
+    """Founder or investor. Starts a Bachs checkout for the chosen paid tier + billing interval."""
+    role, profile = _get_profile(current_user, db)
     if profile is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Create your profile before upgrading.")
 
-    if profile.verification_tier != VerificationTierEnum.basic:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="You already have an active premium plan.")
-
-    product_id = _product_id_for_plan(payload.plan)
+    product_id = _product_id(role, payload.tier, payload.interval)
     if not product_id:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Billing is not configured yet.")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Billing is not configured yet for this plan.")
 
     try:
         session = bachs.create_checkout_session(
             product_id=product_id,
             customer_email=current_user.email,
-            metadata={"founder_profile_id": str(profile.id), "plan": payload.plan},
+            metadata={
+                "role": role,
+                "profile_id": str(profile.id),
+                "tier": payload.tier,
+                "interval": payload.interval,
+            },
         )
     except bachs.BachsError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
@@ -80,15 +117,17 @@ def create_checkout(
 
     # Record the pending subscription now, keyed by the checkout session id,
     # so the webhook has a row to attach the real bachs_subscription_id to
-    # once payment completes. Left at status=active with no period end
-    # until the webhook fills those in — reads of verification_tier never
-    # look at this row directly, only at the profile flag it sets.
-    existing = db.query(FounderSubscription).filter(FounderSubscription.founder_profile_id == profile.id).first()
+    # once payment completes. Reads of verification_tier never look at
+    # this row directly, only at the profile flag the webhook sets.
+    SubModel = _subscription_model(role)
+    fk_field = _subscription_fk_field(role)
+    existing = db.query(SubModel).filter(getattr(SubModel, fk_field) == profile.id).first()
     if existing is None:
-        existing = FounderSubscription(founder_profile_id=profile.id, plan=SubscriptionPlanEnum(payload.plan))
+        existing = SubModel(**{fk_field: profile.id}, tier=VerificationTierEnum(payload.tier), interval=BillingIntervalEnum(payload.interval))
         db.add(existing)
     else:
-        existing.plan = SubscriptionPlanEnum(payload.plan)
+        existing.tier = VerificationTierEnum(payload.tier)
+        existing.interval = BillingIntervalEnum(payload.interval)
     existing.bachs_checkout_session_id = session.get("id")
     existing.currency = "NGN"
     db.commit()
@@ -98,17 +137,21 @@ def create_checkout(
 
 @router.get("/subscription", response_model=SubscriptionStatusResponse)
 def get_my_subscription(
-    current_user: User = Depends(require_role("founder")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
+    role, profile = _get_profile(current_user, db)
     if profile is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Create your profile first.")
 
-    sub = db.query(FounderSubscription).filter(FounderSubscription.founder_profile_id == profile.id).first()
+    SubModel = _subscription_model(role)
+    fk_field = _subscription_fk_field(role)
+    sub = db.query(SubModel).filter(getattr(SubModel, fk_field) == profile.id).first()
+
     return SubscriptionStatusResponse(
         verification_tier=profile.verification_tier.value,
-        plan=sub.plan.value if sub else None,
+        tier=sub.tier.value if sub else None,
+        interval=sub.interval.value if sub else None,
         status=sub.status.value if sub else None,
         current_period_end=sub.current_period_end if sub else None,
     )
@@ -116,19 +159,20 @@ def get_my_subscription(
 
 @router.post("/cancel", status_code=status.HTTP_204_NO_CONTENT)
 def cancel_my_subscription(
-    current_user: User = Depends(require_role("founder")),
+    current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
     Cancels at Bachs immediately. verification_tier is NOT downgraded here —
-    that only happens when the subscription.canceled webhook confirms it,
-    keeping this endpoint consistent with "webhooks are the source of
-    truth for fulfilment" rather than trusting the cancel-call response.
+    that only happens once the subscription.canceled webhook confirms it,
+    so the badge/feature access stays consistent with "webhooks are the
+    source of truth for fulfilment" and the user keeps what they already
+    paid for through the end of the current period.
     """
-    profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
-    sub = db.query(FounderSubscription).filter(
-        FounderSubscription.founder_profile_id == profile.id if profile else False
-    ).first()
+    role, profile = _get_profile(current_user, db)
+    SubModel = _subscription_model(role)
+    fk_field = _subscription_fk_field(role)
+    sub = db.query(SubModel).filter(getattr(SubModel, fk_field) == (profile.id if profile else None)).first()
     if sub is None or not sub.bachs_subscription_id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active subscription found.")
 
@@ -175,23 +219,32 @@ async def bachs_webhook(
 
     data = event.get("data", event)
     metadata = data.get("metadata", {}) or {}
-    founder_profile_id = metadata.get("founder_profile_id")
+    role = metadata.get("role")
+    profile_id = metadata.get("profile_id")
+
+    ProfileModel = FounderProfile if role == "founder" else InvestorProfile if role == "investor" else None
+    SubModel = _subscription_model(role) if role in ("founder", "investor") else None
+    fk_field = _subscription_fk_field(role) if role in ("founder", "investor") else None
 
     if event_type in ("collection.succeeded", "checkout.completed", "invoice.paid"):
-        if not founder_profile_id:
+        if ProfileModel is None or not profile_id:
             return {"status": "ignored_no_metadata"}
 
-        profile = db.query(FounderProfile).filter(FounderProfile.id == founder_profile_id).first()
+        profile = db.query(ProfileModel).filter(ProfileModel.id == profile_id).first()
         if profile is None:
             return {"status": "ignored_unknown_profile"}
 
-        sub = db.query(FounderSubscription).filter(FounderSubscription.founder_profile_id == profile.id).first()
+        sub = db.query(SubModel).filter(getattr(SubModel, fk_field) == profile.id).first()
         if sub is None:
-            sub = FounderSubscription(
-                founder_profile_id=profile.id,
-                plan=SubscriptionPlanEnum(metadata.get("plan", "monthly")),
+            sub = SubModel(
+                **{fk_field: profile.id},
+                tier=VerificationTierEnum(metadata.get("tier", "basic")),
+                interval=BillingIntervalEnum(metadata.get("interval", "monthly")),
             )
             db.add(sub)
+        else:
+            sub.tier = VerificationTierEnum(metadata.get("tier", sub.tier.value))
+            sub.interval = BillingIntervalEnum(metadata.get("interval", sub.interval.value))
 
         sub.status = SubscriptionStatusEnum.active
         sub.bachs_subscription_id = data.get("subscription_id") or data.get("subscription", {}).get("id")
@@ -204,12 +257,17 @@ async def bachs_webhook(
             sub.amount = amount
         sub.currency = data.get("currency", "NGN")
 
-        profile.verification_tier = VerificationTierEnum.business_verified
+        profile.verification_tier = sub.tier
         db.commit()
 
     elif event_type in ("subscription.canceled", "subscription.expired", "invoice.payment_failed"):
         bachs_sub_id = data.get("subscription_id") or data.get("id")
+
         sub = db.query(FounderSubscription).filter(FounderSubscription.bachs_subscription_id == bachs_sub_id).first()
+        resolved_role = "founder"
+        if sub is None:
+            sub = db.query(InvestorSubscription).filter(InvestorSubscription.bachs_subscription_id == bachs_sub_id).first()
+            resolved_role = "investor"
         if sub is None:
             return {"status": "ignored_unknown_subscription"}
 
@@ -218,9 +276,11 @@ async def bachs_webhook(
         else:
             sub.status = SubscriptionStatusEnum.canceled
             sub.canceled_at = datetime.now(timezone.utc)
-            profile = db.query(FounderProfile).filter(FounderProfile.id == sub.founder_profile_id).first()
+            ProfileModel = FounderProfile if resolved_role == "founder" else InvestorProfile
+            fk_field = _subscription_fk_field(resolved_role)
+            profile = db.query(ProfileModel).filter(ProfileModel.id == getattr(sub, fk_field)).first()
             if profile is not None:
-                profile.verification_tier = VerificationTierEnum.basic
+                profile.verification_tier = VerificationTierEnum.starter
         db.commit()
 
     return {"status": "processed"}
