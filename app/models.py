@@ -58,6 +58,12 @@ class AuthProviderEnum(str, enum.Enum):
     google = "google"
 
 
+class VerificationTierEnum(str, enum.Enum):
+    starter = "starter"
+    basic = "basic"
+    premium = "premium"
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -81,10 +87,15 @@ class User(Base):
     # can't be invalidated early, so this one stateful field is what makes
     # that possible without a full session-store rewrite.
     current_session_id = Column(UUID(as_uuid=True), nullable=True)
+    # Founder/investor subscription tier lives on the account, not on any
+    # one startup profile — a founder's plan applies to every startup
+    # they manage (see Subscription, keyed by user_id). Meaningless
+    # for admin accounts.
+    verification_tier = Column(Enum(VerificationTierEnum), nullable=False, default=VerificationTierEnum.starter)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    founder_profile = relationship("FounderProfile", back_populates="user", uselist=False)
+    founder_profiles = relationship("FounderProfile", back_populates="user")
     investor_profile = relationship("InvestorProfile", back_populates="user", uselist=False)
 
 
@@ -96,22 +107,19 @@ class StageEnum(str, enum.Enum):
     series_b_plus = "series_b_plus"
 
 
-class VerificationTierEnum(str, enum.Enum):
-    starter = "starter"
-    basic = "basic"
-    premium = "premium"
-
-
 class FounderProfile(Base):
     """
-    One-to-one with a founder User. Per PRD 3.2 — the profile a founder
-    builds and publishes for investors to discover.
+    Many-to-one with a founder User — a founder's plan (see
+    User.verification_tier) determines how many of these they're allowed:
+    1 on starter, 3 on basic, unlimited on premium (enforced in
+    routers/founder_profiles.py, not here). Per PRD 3.2 — a profile a
+    founder builds and publishes for investors to discover.
     """
 
     __tablename__ = "founder_profiles"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False, index=True)
 
     startup_name = Column(String, nullable=False)
     tagline = Column(String, nullable=True)
@@ -131,8 +139,12 @@ class FounderProfile(Base):
     # Founder's choice, off by default per PRD 3.4 — contact stays gated
     # behind an accepted connection request unless they opt in here.
     contact_visibility = Column(String, nullable=False, default="private")
-    verification_tier = Column(Enum(VerificationTierEnum), nullable=False, default=VerificationTierEnum.starter)
     published = Column(Boolean, nullable=False, default=False)
+    # Set whenever this profile is (re)published while the owner is on
+    # premium — see _apply_premium_expiry in routers/founder_profiles.py.
+    # A premium founder's profile auto-unpublishes 90 days after this
+    # timestamp; null on starter/basic, where publishing never expires.
+    published_until = Column(DateTime(timezone=True), nullable=True)
     # Per PRD 3.5 (Founder Interview/Spotlight Program). Admin-set only —
     # see require_role("admin") on PATCH /{id}/spotlight in
     # routers/founder_profiles.py. No self-nomination workflow yet; that's
@@ -143,7 +155,7 @@ class FounderProfile(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    user = relationship("User", back_populates="founder_profile")
+    user = relationship("User", back_populates="founder_profiles")
 
 
 class InvestorTypeEnum(str, enum.Enum):
@@ -186,9 +198,9 @@ class InvestorProfile(Base):
     published = Column(Boolean, nullable=False, default=False)
     # Same gating pattern as FounderProfile.contact_visibility.
     contact_visibility = Column(String, nullable=False, default="private")
-    # Paid tier — same starter/basic/premium scheme as FounderProfile,
-    # driven by InvestorSubscription via Bachs (see routers/billing.py).
-    verification_tier = Column(Enum(VerificationTierEnum), nullable=False, default=VerificationTierEnum.starter)
+    # Paid tier lives on User.verification_tier now (one investor = one
+    # profile, but keeping tier off this table matches FounderProfile and
+    # means billing.py doesn't need two different lookup paths).
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
@@ -313,21 +325,25 @@ class SubscriptionStatusEnum(str, enum.Enum):
     canceled = "canceled"
 
 
-class FounderSubscription(Base):
+class Subscription(Base):
     """
-    One row per founder's paid plan (basic/premium — see
-    VerificationTierEnum) via Bachs. verification_tier on FounderProfile
-    is the fast-path flag the rest of the app reads; this table is the
-    billing system of record behind it — created/updated only from the
-    Bachs webhook in app/routers/billing.py, never optimistically from the
-    checkout redirect (per Bachs' own guidance: webhooks are the source
-    of truth for fulfilment).
+    One row per user's paid plan (basic/premium — see
+    VerificationTierEnum), for founders and investors alike.
+    User.verification_tier is the fast-path flag the rest of the app
+    reads (it's account-level, so it applies to every startup profile a
+    founder manages); this table is the billing system of record behind
+    it — created/updated only from the Bachs webhook in
+    app/routers/billing.py, never optimistically from the checkout
+    redirect (per Bachs' own guidance: webhooks are the source of truth
+    for fulfilment). Merged from the earlier separate
+    founder_subscriptions/investor_subscriptions tables once both keyed
+    off the same user_id anyway.
     """
 
-    __tablename__ = "founder_subscriptions"
+    __tablename__ = "subscriptions"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    founder_profile_id = Column(UUID(as_uuid=True), ForeignKey("founder_profiles.id"), unique=True, nullable=False)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True, nullable=False)
 
     # Which paid tier this subscription is for — basic or premium.
     # (starter is free and never has a subscription row at all.)
@@ -351,40 +367,7 @@ class FounderSubscription(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-    founder_profile = relationship("FounderProfile")
-
-
-class InvestorSubscription(Base):
-    """
-    Mirrors FounderSubscription exactly, for investors' basic/premium
-    plans. Kept as a separate table (rather than a shared one with a
-    nullable founder/investor FK) so each stays a clean 1:1 with its own
-    profile table and neither picks up unused columns.
-    """
-
-    __tablename__ = "investor_subscriptions"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    investor_profile_id = Column(UUID(as_uuid=True), ForeignKey("investor_profiles.id"), unique=True, nullable=False)
-
-    tier = Column(Enum(VerificationTierEnum), nullable=False)
-    interval = Column(Enum(BillingIntervalEnum), nullable=False)
-    status = Column(Enum(SubscriptionStatusEnum), nullable=False, default=SubscriptionStatusEnum.active)
-
-    bachs_subscription_id = Column(String, nullable=True, index=True)
-    bachs_customer_id = Column(String, nullable=True)
-    bachs_checkout_session_id = Column(String, nullable=True)
-
-    currency = Column(String, nullable=False, default="NGN")
-    amount = Column(Numeric(14, 2), nullable=True)
-
-    current_period_end = Column(DateTime(timezone=True), nullable=True)
-    canceled_at = Column(DateTime(timezone=True), nullable=True)
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-    investor_profile = relationship("InvestorProfile")
+    user = relationship("User")
 
 
 class BillingEvent(Base):

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
@@ -13,6 +13,7 @@ from app.models import (
     FounderProfile,
     InvestorProfile,
     User,
+    VerificationTierEnum,
 )
 from app.schemas import (
     ConnectionRequestCreate,
@@ -23,6 +24,14 @@ from app.schemas import (
 
 router = APIRouter(prefix="/api/v1/connections", tags=["Connections"])
 
+# Basic-tier founders are capped on INTROS — new connection requests they
+# send to investors — not on regular chat once a connection exists. See
+# POST /to-investor below. starter/premium have no cap here (starter
+# can't send these at all per the product's current plan structure is
+# unchanged for starter; premium is simply unlimited).
+BASIC_INTRO_MONTHLY_LIMIT = 5
+BASIC_INTRO_WINDOW = timedelta(days=30)
+
 
 def _to_response(connection: ConnectionRequest) -> ConnectionRequestResponse:
     response = ConnectionRequestResponse.model_validate(connection)
@@ -31,11 +40,18 @@ def _to_response(connection: ConnectionRequest) -> ConnectionRequestResponse:
     return response
 
 
-def _get_founder_profile_or_404(current_user: User, db: Session) -> FounderProfile:
-    profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
-    if profile is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Create your founder profile first.")
+def _get_owned_founder_profile_or_404(profile_id, current_user: User, db: Session) -> FounderProfile:
+    profile = db.query(FounderProfile).filter(FounderProfile.id == profile_id).first()
+    if profile is None or profile.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Startup profile not found.")
     return profile
+
+
+def _my_founder_profile_ids(current_user: User, db: Session) -> list:
+    return [
+        row[0]
+        for row in db.query(FounderProfile.id).filter(FounderProfile.user_id == current_user.id).all()
+    ]
 
 
 @router.post("", response_model=ConnectionRequestResponse, status_code=status.HTTP_201_CREATED)
@@ -44,7 +60,7 @@ def create_connection_request(
     current_user: User = Depends(require_role("investor")),
     db: Session = Depends(get_db),
 ):
-    """Investor-initiated — an investor requesting to connect with a founder."""
+    """Investor-initiated — an investor requesting to connect with a founder's specific startup."""
     profile = db.query(FounderProfile).filter(FounderProfile.id == payload.founder_profile_id).first()
     if profile is None or not profile.published:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found.")
@@ -79,12 +95,45 @@ def create_connection_request_to_investor(
 ):
     """
     Founder-initiated — the mirror of the investor-initiated endpoint
-    above. A founder pitching an investor rather than waiting to be
-    discovered. Same underlying table and unique constraint as the
-    investor-initiated path — the pair can only have one open request
-    regardless of who started it.
+    above. A founder pitching an investor, from one of their (possibly
+    several) startup profiles, rather than waiting to be discovered. Same
+    underlying table and unique constraint as the investor-initiated
+    path — the pair can only have one open request regardless of who
+    started it.
+
+    Basic-tier founders are capped at BASIC_INTRO_MONTHLY_LIMIT of these
+    per rolling 30 days, counted across every startup they own (the cap
+    is on the founder's account, not per-profile). starter and premium
+    are unaffected — see BASIC_INTRO_MONTHLY_LIMIT above.
     """
-    founder_profile = _get_founder_profile_or_404(current_user, db)
+    founder_profile = _get_owned_founder_profile_or_404(payload.founder_profile_id, current_user, db)
+
+    if current_user.verification_tier == VerificationTierEnum.starter:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Reaching out to investors first requires a Basic or Premium plan. Upgrade to send intro messages.",
+        )
+
+    if current_user.verification_tier == VerificationTierEnum.basic:
+        my_profile_ids = _my_founder_profile_ids(current_user, db)
+        window_start = datetime.now(timezone.utc) - BASIC_INTRO_WINDOW
+        sent_this_window = (
+            db.query(ConnectionRequest)
+            .filter(
+                ConnectionRequest.founder_profile_id.in_(my_profile_ids),
+                ConnectionRequest.initiator == ConnectionInitiatorEnum.founder.value,
+                ConnectionRequest.created_at >= window_start,
+            )
+            .count()
+        )
+        if sent_this_window >= BASIC_INTRO_MONTHLY_LIMIT:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Your Basic plan allows {BASIC_INTRO_MONTHLY_LIMIT} introductory messages to investors "
+                    "every 30 days. Upgrade to Premium for unlimited messaging."
+                ),
+            )
 
     investor_profile = (
         db.query(InvestorProfile)
@@ -119,18 +168,18 @@ def list_sent_requests(
     current_user: User = Depends(require_role("investor", "founder")),
     db: Session = Depends(get_db),
 ):
-    """Requests *this* user initiated, regardless of role."""
+    """Requests *this* user initiated, regardless of role. For founders, aggregated across all their startups."""
     if current_user.role == "investor":
         query = db.query(ConnectionRequest).filter(
             ConnectionRequest.investor_id == current_user.id,
             ConnectionRequest.initiator == ConnectionInitiatorEnum.investor.value,
         )
     else:
-        founder_profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
-        if founder_profile is None:
+        my_profile_ids = _my_founder_profile_ids(current_user, db)
+        if not my_profile_ids:
             return []
         query = db.query(ConnectionRequest).filter(
-            ConnectionRequest.founder_profile_id == founder_profile.id,
+            ConnectionRequest.founder_profile_id.in_(my_profile_ids),
             ConnectionRequest.initiator == ConnectionInitiatorEnum.founder.value,
         )
 
@@ -143,13 +192,13 @@ def list_received_requests(
     current_user: User = Depends(require_role("investor", "founder")),
     db: Session = Depends(get_db),
 ):
-    """Requests initiated *at* this user by the other side — the ones they need to accept/decline."""
+    """Requests initiated *at* this user by the other side. For founders, aggregated across all their startups."""
     if current_user.role == "founder":
-        founder_profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
-        if founder_profile is None:
+        my_profile_ids = _my_founder_profile_ids(current_user, db)
+        if not my_profile_ids:
             return []
         query = db.query(ConnectionRequest).filter(
-            ConnectionRequest.founder_profile_id == founder_profile.id,
+            ConnectionRequest.founder_profile_id.in_(my_profile_ids),
             ConnectionRequest.initiator == ConnectionInitiatorEnum.investor.value,
         )
     else:

@@ -62,9 +62,10 @@ InvestorTypeLiteral = Literal["angel", "vc", "fund", "family_office", "other"]
 
 class FounderProfileUpsert(BaseModel):
     """
-    Used for both create and update — a founder has exactly one profile, so
-    the endpoint is a single upsert rather than separate create/update
-    routes with different validation rules.
+    Shared field set for both creating a new startup profile and editing
+    an existing one — see routers/founder_profiles.py for the separate
+    create/update routes (a founder can own several profiles, up to
+    their plan's limit; see User.verification_tier).
     """
 
     startup_name: str
@@ -123,10 +124,17 @@ class FounderProfileResponse(BaseModel):
     gallery_image_urls: list[str] = []
     startup_link: Optional[str] = None
     contact_visibility: str
-    verification_tier: str
     published: bool
+    # Null unless published_until is set by the owner's plan (premium's
+    # 90-day auto-unpublish) — see routers/founder_profiles.py.
+    published_until: Optional[datetime] = None
     is_spotlighted: bool = False
     created_at: datetime
+    # Populated by the router from the OWNER's User.verification_tier, not
+    # read off this profile row directly — tier is now an account-level
+    # subscription, not per-profile. See _attach_contact_if_visible in
+    # routers/founder_profiles.py for where this gets set.
+    verification_tier: str = "starter"
     # Populated by the router, not the ORM object directly — see
     # routers/founder_profiles.py for when this is (and isn't) attached.
     contact: Optional[FounderContactInfo] = None
@@ -145,6 +153,9 @@ class ConnectionRequestCreateToInvestor(BaseModel):
     POST /connections/to-investor in routers/connections.py."""
 
     investor_user_id: uuid.UUID
+    # Which of the founder's (possibly several) startups is reaching out —
+    # required now that one founder can own more than one profile.
+    founder_profile_id: uuid.UUID
     message: Optional[str] = None
 
 
@@ -220,9 +231,12 @@ class InvestorProfileResponse(BaseModel):
     profile_picture_url: Optional[str] = None
     linkedin_url: Optional[str] = None
     contact_visibility: str
-    verification_tier: str
     published: bool
     created_at: datetime
+    # Populated by the router from User.verification_tier, not read off
+    # this profile row — tier is an account-level subscription now. See
+    # routers/investor_profiles.py.
+    verification_tier: str = "starter"
     # Populated by the router, not the ORM object directly — see
     # routers/investor_profiles.py for when this is (and isn't) attached.
     contact: Optional[InvestorContactInfo] = None

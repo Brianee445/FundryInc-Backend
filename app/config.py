@@ -42,9 +42,10 @@ class Settings(BaseSettings):
     # parameter — create both in the Bachs dashboard and paste the ids here.
     # Bachs product_ids for each paid (tier, interval) combination, per
     # role. starter is free and has no product id. Create all 8 recurring
-    # products in the Bachs dashboard first (₦3,000/mo & ₦30,000/yr basic,
-    # ₦5,000/mo & ₦50,000/yr premium — annual = 10x monthly per plan — for
-    # both founders and investors), then paste their prod_... ids below.
+    # products in the Bachs dashboard first — basic ₦2,000/mo & ₦24,000/yr;
+    # premium ₦5,000/mo & ₦60,000/yr (₦50,000/yr as the discounted/promo
+    # price, ₦10,000 savings) — for both founders and investors, then
+    # paste their prod_... ids below.
     bachs_founder_basic_monthly_product_id: str = ""
     bachs_founder_basic_annual_product_id: str = ""
     bachs_founder_premium_monthly_product_id: str = ""

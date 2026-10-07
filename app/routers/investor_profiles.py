@@ -21,6 +21,7 @@ def _attach_contact_if_visible(
     this investor (started by either side — see ConnectionRequest.initiator).
     """
     response = InvestorProfileResponse.model_validate(profile)
+    response.verification_tier = profile.user.verification_tier.value
 
     if viewer is not None and viewer.id == profile.user_id:
         response.contact = InvestorContactInfo(email=profile.user.email)

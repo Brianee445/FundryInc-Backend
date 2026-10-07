@@ -45,8 +45,17 @@ def founder_analytics(
     current_user: User = Depends(require_role("founder")),
     db: Session = Depends(get_db),
 ):
-    profile = db.query(FounderProfile).filter(FounderProfile.user_id == current_user.id).first()
-    if profile is None:
+    """
+    Aggregated across every startup profile this founder owns — a
+    founder's plan/analytics are account-level, not per-startup, so
+    someone managing 3 profiles on Basic sees one combined picture here
+    rather than picking a profile first.
+    """
+    profile_ids = [
+        row[0]
+        for row in db.query(FounderProfile.id).filter(FounderProfile.user_id == current_user.id).all()
+    ]
+    if not profile_ids:
         # No profile yet — everything is zero rather than a 404, since an
         # empty dashboard chart is a perfectly valid state, not an error.
         empty_daily = _daily_series([])
@@ -62,15 +71,15 @@ def founder_analytics(
             messages_total=0,
         )
 
-    views = db.query(FounderProfileView).filter(FounderProfileView.founder_profile_id == profile.id).all()
-    connections = db.query(ConnectionRequest).filter(ConnectionRequest.founder_profile_id == profile.id).all()
+    views = db.query(FounderProfileView).filter(FounderProfileView.founder_profile_id.in_(profile_ids)).all()
+    connections = db.query(ConnectionRequest).filter(ConnectionRequest.founder_profile_id.in_(profile_ids)).all()
     saved_count = (
-        db.query(SavedFounderProfile).filter(SavedFounderProfile.founder_profile_id == profile.id).count()
+        db.query(SavedFounderProfile).filter(SavedFounderProfile.founder_profile_id.in_(profile_ids)).count()
     )
     messages_total = (
         db.query(Message)
         .join(ConnectionRequest, ConnectionRequest.id == Message.connection_id)
-        .filter(ConnectionRequest.founder_profile_id == profile.id, Message.sender_id == current_user.id)
+        .filter(ConnectionRequest.founder_profile_id.in_(profile_ids), Message.sender_id == current_user.id)
         .count()
     )
 
