@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     # https://sandbox-api.bachs.io. Swap to sk_live_ + https://api.bachs.io
     # to go live — see app/services/bachs.py.
     bachs_api_key: str = ""
-    bachs_api_base_url: str = "https://sandbox-api.bachs.io"
+    bachs_api_base_url: str = "https://api.bachs.io"
     bachs_webhook_secret: str = ""
     # The Bachs product_id for the recurring "Founder Premium" (gold
     # verification) plan. Monthly and annual are two separate Bachs
@@ -57,8 +57,8 @@ class Settings(BaseSettings):
     # Where Bachs' hosted checkout redirects the browser after payment.
     # Fulfilment itself never depends on this — only the webhook does —
     # this is purely for UX (what the user sees after paying).
-    frontend_billing_return_url: str = "http://localhost:3000/billing?billing=success"
-    frontend_billing_cancel_url: str = "http://localhost:3000/billing?billing=cancelled"
+    frontend_billing_return_url: str = "https://fundry-inc.vercel.app/billing?billing=success"
+    frontend_billing_cancel_url: str = "https://fundry-inc.vercel.app/billing?billing=cancelled"
 
     class Config:
         env_file = ".env"
