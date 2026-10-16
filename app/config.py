@@ -30,33 +30,34 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     supabase_storage_bucket: str = "founder-media"
 
-    # Bachs (payments/billing). Sandbox first: sk_sandbox_ key against
-    # https://sandbox-api.bachs.io. Swap to sk_live_ + https://api.bachs.io
-    # to go live — see app/services/bachs.py.
-    bachs_api_key: str = ""
-    bachs_api_base_url: str = "https://api.bachs.io"
-    bachs_webhook_secret: str = ""
-    # The Bachs product_id for the recurring "Founder Premium" (gold
-    # verification) plan. Monthly and annual are two separate Bachs
-    # products (different prices/intervals), not one product with a
-    # parameter — create both in the Bachs dashboard and paste the ids here.
-    # Bachs product_ids for each paid (tier, interval) combination, per
-    # role. starter is free and has no product id. Create all 8 recurring
-    # products in the Bachs dashboard first — basic ₦2,000/mo & ₦24,000/yr;
-    # premium ₦5,000/mo & ₦60,000/yr (₦50,000/yr as the discounted/promo
-    # price, ₦10,000 savings) — for both founders and investors, then
-    # paste their prod_... ids below.
-    bachs_founder_basic_monthly_product_id: str = ""
-    bachs_founder_basic_annual_product_id: str = ""
-    bachs_founder_premium_monthly_product_id: str = ""
-    bachs_founder_premium_annual_product_id: str = ""
-    bachs_investor_basic_monthly_product_id: str = ""
-    bachs_investor_basic_annual_product_id: str = ""
-    bachs_investor_premium_monthly_product_id: str = ""
-    bachs_investor_premium_annual_product_id: str = ""
-    # Where Bachs' hosted checkout redirects the browser after payment.
-    # Fulfilment itself never depends on this — only the webhook does —
-    # this is purely for UX (what the user sees after paying).
+    # Paystack (payments/billing). Test vs live is just the key prefix —
+    # sk_test_... or sk_live_... — against the same api.paystack.co; there
+    # is no separate sandbox base URL like Bachs had. See
+    # app/services/paystack.py. Unlike Bachs, Paystack has no separate
+    # webhook-signing secret: inbound webhooks are verified with this same
+    # secret key (see app/services/webhook_verify.py).
+    paystack_secret_key: str = ""
+    paystack_public_key: str = ""
+    # Paystack plan codes (PLN_...) for each paid (tier, interval)
+    # combination, per role. starter is free and has no plan. Create all
+    # 8 recurring plans in the Paystack dashboard first — basic
+    # ₦2,000/mo & ₦24,000/yr; premium ₦5,000/mo & ₦60,000/yr (₦50,000/yr
+    # as the discounted/promo price, ₦10,000 savings) — for both founders
+    # and investors, then paste their PLN_... codes below. A plan's price
+    # is fixed at creation in the Paystack dashboard; these codes are
+    # how initialize_transaction() in paystack.py picks the right one.
+    paystack_founder_basic_monthly_plan_code: str = ""
+    paystack_founder_basic_annual_plan_code: str = ""
+    paystack_founder_premium_monthly_plan_code: str = ""
+    paystack_founder_premium_annual_plan_code: str = ""
+    paystack_investor_basic_monthly_plan_code: str = ""
+    paystack_investor_basic_annual_plan_code: str = ""
+    paystack_investor_premium_monthly_plan_code: str = ""
+    paystack_investor_premium_annual_plan_code: str = ""
+    # Where Paystack sends the browser back to after payment (whether it
+    # succeeded or the user backed out — Paystack doesn't distinguish
+    # with separate URLs the way Bachs did). Fulfilment itself never
+    # depends on this — only the webhook does — this is purely for UX.
     frontend_billing_return_url: str = "https://fundry-inc.vercel.app/billing?billing=success"
     frontend_billing_cancel_url: str = "https://fundry-inc.vercel.app/billing?billing=cancelled"
 

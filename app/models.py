@@ -332,10 +332,10 @@ class Subscription(Base):
     User.verification_tier is the fast-path flag the rest of the app
     reads (it's account-level, so it applies to every startup profile a
     founder manages); this table is the billing system of record behind
-    it — created/updated only from the Bachs webhook in
+    it — created/updated only from the Paystack webhook in
     app/routers/billing.py, never optimistically from the checkout
-    redirect (per Bachs' own guidance: webhooks are the source of truth
-    for fulfilment). Merged from the earlier separate
+    redirect (per Paystack's own guidance: webhooks are the source of
+    truth for fulfilment). Merged from the earlier separate
     founder_subscriptions/investor_subscriptions tables once both keyed
     off the same user_id anyway.
     """
@@ -351,12 +351,16 @@ class Subscription(Base):
     interval = Column(Enum(BillingIntervalEnum), nullable=False)
     status = Column(Enum(SubscriptionStatusEnum), nullable=False, default=SubscriptionStatusEnum.active)
 
-    # Bachs-side identifiers — sub_..., cust_..., chk_... — kept so we can
-    # look up or cancel the subscription later and so webhook events (which
-    # carry these ids, not our own) can be matched back to this row.
-    bachs_subscription_id = Column(String, nullable=True, index=True)
-    bachs_customer_id = Column(String, nullable=True)
-    bachs_checkout_session_id = Column(String, nullable=True)
+    # Paystack identifiers. subscription_code (SUB_...) + email_token are
+    # BOTH required to cancel a subscription via Paystack's API — Paystack
+    # hands both back on the subscription.create webhook event, never
+    # something we choose ourselves. customer_code (CUS_...) identifies
+    # the payer; paystack_reference is the initializing transaction's
+    # reference, kept for lookups/audits.
+    paystack_subscription_code = Column(String, nullable=True, index=True)
+    paystack_email_token = Column(String, nullable=True)
+    paystack_customer_code = Column(String, nullable=True)
+    paystack_reference = Column(String, nullable=True)
 
     currency = Column(String, nullable=False, default="NGN")
     amount = Column(Numeric(14, 2), nullable=True)
@@ -372,17 +376,21 @@ class Subscription(Base):
 
 class BillingEvent(Base):
     """
-    Raw log of every webhook event we've processed, keyed by Bachs' own
-    event id. Two things this buys us: an idempotency check (Bachs, like
-    most webhook senders, can redeliver the same event — see
-    routers/billing.py's webhook handler checking this table first) and an
-    audit trail if a payment dispute ever needs investigating.
+    Raw log of every webhook event we've processed, keyed by an
+    identifier derived from the event itself (Paystack has no single
+    canonical event id field the way some providers do — see
+    routers/billing.py's paystack_webhook for exactly how
+    provider_event_id is derived per event type). Two things this buys
+    us: an idempotency check (Paystack, like most webhook senders, can
+    redeliver the same event — see routers/billing.py's webhook handler
+    checking this table first) and an audit trail if a payment dispute
+    ever needs investigating.
     """
 
     __tablename__ = "billing_events"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
-    bachs_event_id = Column(String, unique=True, nullable=False, index=True)
+    provider_event_id = Column(String, unique=True, nullable=False, index=True)
     event_type = Column(String, nullable=False)
     payload = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())

@@ -1,4 +1,4 @@
-# Bachs billing v3 — multi-profile founders, account-level tiers
+# Billing — multi-profile founders, account-level tiers, Paystack
 
 Tiers (account-level — `User.verification_tier`, covers every startup a
 founder manages, not per-profile):
@@ -12,56 +12,68 @@ founder manages, not per-profile):
 Investors have the same three tiers/prices; the limits above (profile
 count, intro cap, auto-unpublish) only apply to founders.
 
-## What changed from v2
-- `User.verification_tier` — tier moved off `FounderProfile`/
-  `InvestorProfile` onto the account. A founder's plan now covers every
-  startup they own.
+## Billing provider: Paystack (switched from Bachs)
+
+- **No sandbox base URL.** Test vs live is just the API key prefix —
+  `sk_test_...` or `sk_live_...` — against the same
+  `https://api.paystack.co`. See `app/services/paystack.py`.
+- **Plans, not "products."** Paystack calls the recurring price object a
+  *plan* (`PLN_...`), created in the Paystack dashboard. A subscription
+  is created by attaching a plan code to `POST /transaction/initialize`
+  — there's no separate "create subscription" call for this flow.
+- **Amounts are in kobo** (smallest unit), not a decimal string. See
+  `paystack.to_kobo()`.
+- **Webhook signature**: HMAC-**SHA512** over the raw body, header
+  `x-paystack-signature`, keyed with the same secret key used for API
+  calls — Paystack has no separate webhook-signing secret the way Bachs
+  did. See `app/services/webhook_verify.py`.
+- **Webhook events**: `charge.success` (first payment and every
+  renewal), `subscription.create` (carries `subscription_code` +
+  `email_token`, both required to cancel later), `subscription.disable`
+  (cancellation confirmed), `invoice.payment_failed`.
+- **Cancelling** requires both `subscription_code` and `email_token` —
+  Paystack hands both back on `subscription.create`, never something we
+  generate ourselves. See `Subscription.paystack_subscription_code` /
+  `paystack_email_token` in `models.py`.
+
+## Setup
+1. Create **8** recurring plans in the Paystack dashboard at the prices
+   above (basic/premium × monthly/annual × founder/investor). Paste all
+   8 `PLN_...` codes into env vars — see `.env.example`.
+2. Set `PAYSTACK_SECRET_KEY` (`sk_test_...` to start) and
+   `PAYSTACK_PUBLIC_KEY` in Render.
+3. Point a Paystack webhook (in the dashboard's API Keys & Webhooks
+   settings) at `POST /api/v1/billing/webhook`. No separate secret to
+   configure there — Paystack signs with your existing secret key.
+4. Run `migration_switch_to_paystack.sql` (after
+   `migration_multi_profile.sql` has already been applied). It renames
+   the Bachs-named columns on `subscriptions`/`billing_events` to their
+   Paystack equivalents and adds the new `paystack_email_token` column.
+5. Test in Paystack's test mode end to end before swapping to
+   `sk_live_...`.
+
+## Multi-profile founders (unchanged from the earlier migration)
+- `User.verification_tier` — tier lives on the account, not any one
+  startup profile. A founder's plan covers every startup they own.
 - `FounderProfile.user_id` is no longer unique — founders can own
   multiple startup profiles, capped by `PROFILE_LIMITS` in
   `routers/founder_profiles.py` (1/3/unlimited).
 - `FounderProfile.published_until` — premium's 90-day auto-unpublish
   window; checked lazily on read (`_maybe_auto_unpublish`), not via a
   background job.
-- New endpoints in `founder_profiles.py`: `GET /mine` (list all of my
-  profiles), `POST /mine` (create, enforces the tier cap), `PUT`/`DELETE
-  /{profile_id}` (manage a specific one). The old singular `/me`
-  endpoints still work for anything not yet updated to the multi-profile
-  UI — they operate on the founder's oldest profile.
-- `connections.py`: founder-initiated requests (`POST /to-investor`) now
-  require `founder_profile_id` (which startup is pitching) and are
-  capped at 5 per rolling 30 days for `basic` founders, counted across
-  all their profiles. `/sent` and `/received` aggregate across every
-  profile a founder owns.
+- `GET/POST /founder-profiles/mine`, `PUT`/`DELETE /{profile_id}` manage
+  individual profiles; the old singular `/me` endpoints still work
+  against the founder's oldest profile for anything not yet updated.
+- `connections.py`: founder-initiated requests (`POST /to-investor`)
+  require `founder_profile_id` and are capped at 5/30 days for `basic`
+  founders (unlimited on `premium`, blocked outright on `starter`),
+  counted across all their profiles. `/sent` and `/received` aggregate
+  across every profile a founder owns.
 - `analytics.py`: founder analytics aggregate across all of a founder's
-  profiles (not just one).
-- `founder_subscriptions` + `investor_subscriptions` merged into one
-  `subscriptions` table, keyed by `user_id` — both roles now use the
-  exact same billing code path.
-
-## Setup
-1. Create **8** recurring products in the Bachs dashboard at the new
-   prices above (basic/premium × monthly/annual × founder/investor).
-   Paste all 8 `prod_...` ids into env vars — see `.env.example`.
-2. Run `migration_multi_profile.sql` (after the earlier
-   `migration_add_billing.sql` has already been applied). It:
-   - adds `users.verification_tier`, carrying over whatever each
-     founder/investor's profile already had
-   - drops `verification_tier` from `founder_profiles`/
-     `investor_profiles`
-   - drops the unique constraint on `founder_profiles.user_id`
-   - adds `founder_profiles.published_until`
-   - creates `subscriptions`, copying rows over from the old
-     `founder_subscriptions`/`investor_subscriptions` tables (left
-     those old tables in place — drop them manually once you've
-     confirmed the copy looks right; the commented-out `DROP TABLE`
-     lines are at the bottom of the migration file)
-3. Update the 8 product-id env vars + keep `BACHS_API_KEY` /
-   `BACHS_WEBHOOK_SECRET` as before in Render.
+  profiles.
 
 ## Notes
-- `starter` founders are blocked outright from `POST /to-investor` (403)
-  — that feature requires `basic` or `premium`. `basic` is additionally
-  capped at 5/30 days; `premium` is unlimited.
-- The frontend still needs: a profile switcher UI, "create new profile"
-  flow respecting the tier cap, and updated pricing cards. Not yet
-  built as of this backend pass.
+- The frontend's `/billing` page and dashboard upgrade flow needed no
+  changes for the Paystack switch — `CheckoutResponse.checkout_url` is
+  populated with Paystack's `authorization_url` on our side, so the
+  contract the frontend relies on is unchanged.
