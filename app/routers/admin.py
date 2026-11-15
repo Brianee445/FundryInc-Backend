@@ -92,7 +92,7 @@ def waitlist_summary(db: Session = Depends(get_db)):
         "next_batch": min(MAX_EMAILS_PER_SEND, pending),
         "max_per_send": MAX_EMAILS_PER_SEND,
         "gemini_configured": bool(settings.gemini_api_key),
-        "resend_configured": bool(settings.resend_api_key and settings.resend_from_email),
+        "email_configured": bool(settings.brevo_api_key and settings.brevo_sender_email),
     }
 
 
@@ -170,12 +170,22 @@ def _to_html(body: str) -> str:
 
 
 # ------------------------------ Send launch ------------------------------
+# Sends through Brevo's HTTPS API (Render's free tier blocks SMTP ports).
+
+BREVO_URL = "https://api.brevo.com/v3/smtp/email"
+
+
+def _brevo_error(r: requests.Response) -> str:
+    try:
+        return str(r.json().get("message", r.text))[:200]
+    except ValueError:
+        return r.text[:200]
 
 
 @router.post("/waitlist/send-launch", dependencies=[Depends(require_admin)])
 def send_launch_emails(db: Session = Depends(get_db)):
-    if not (settings.resend_api_key and settings.resend_from_email):
-        raise HTTPException(status_code=503, detail="Resend is not configured (RESEND_API_KEY / RESEND_FROM_EMAIL).")
+    if not (settings.brevo_api_key and settings.brevo_sender_email):
+        raise HTTPException(status_code=503, detail="Brevo is not configured (BREVO_API_KEY / BREVO_SENDER_EMAIL).")
 
     if not _send_lock.acquire(blocking=False):
         raise HTTPException(status_code=409, detail="A send is already in progress.")
@@ -193,26 +203,49 @@ def send_launch_emails(db: Session = Depends(get_db)):
         subject, body, used_fallback = _draft_with_gemini()
         html_body = _to_html(body)
 
-        # One message per recipient so nobody sees anyone else's address.
-        batch = [
-            {"from": settings.resend_from_email, "to": [e.email], "subject": subject, "html": html_body, "text": body}
-            for e in entries
-        ]
-        try:
-            resp = requests.post(
-                "https://api.resend.com/emails/batch",
-                headers={"Authorization": f"Bearer {settings.resend_api_key}", "Content-Type": "application/json"},
-                json=batch,
-                timeout=45,
-            )
-        except requests.RequestException:
-            raise HTTPException(status_code=502, detail="Could not reach Resend. Nothing was marked as sent.")
+        sent_entries: list[WaitlistEntry] = []
+        bad_entries: list[WaitlistEntry] = []
+        warning: str | None = None
+        last_error = ""
+        session = requests.Session()
+        session.headers.update({"api-key": settings.brevo_api_key, "accept": "application/json"})
 
-        if resp.status_code >= 300:
-            raise HTTPException(status_code=502, detail=f"Resend rejected the send: {resp.text[:300]}")
+        # One message per recipient so nobody sees anyone else's address.
+        for e in entries:
+            try:
+                r = session.post(
+                    BREVO_URL,
+                    json={
+                        "sender": {"name": settings.brevo_sender_name, "email": settings.brevo_sender_email},
+                        "to": [{"email": e.email}],
+                        "subject": subject,
+                        "htmlContent": html_body,
+                        "textContent": body,
+                    },
+                    timeout=20,
+                )
+            except requests.RequestException:
+                warning = "Lost connection to Brevo partway through. Click again to continue."
+                break
+            if r.status_code in (200, 201):
+                sent_entries.append(e)
+            elif r.status_code == 400:
+                last_error = _brevo_error(r)
+                bad_entries.append(e)
+            else:
+                last_error = f"Brevo stopped the send ({r.status_code}): {_brevo_error(r)}"
+                warning = last_error + ". Click again later to continue."
+                break
+
+        if not sent_entries:
+            # Nothing went out: don't mark anyone, and surface the real reason
+            # (e.g. unverified sender, bad API key) instead of burning the list.
+            raise HTTPException(status_code=502, detail=last_error or warning or "Nothing was sent.")
 
         now = datetime.now(timezone.utc)
-        for e in entries:
+        # Addresses Brevo rejected as invalid are marked done so they don't
+        # clog every future batch.
+        for e in sent_entries + bad_entries:
             e.launch_notified_at = now
         db.commit()
 
@@ -220,11 +253,13 @@ def send_launch_emails(db: Session = Depends(get_db)):
             db.query(func.count(WaitlistEntry.id)).filter(WaitlistEntry.launch_notified_at.is_(None)).scalar() or 0
         )
         return {
-            "sent": len(entries),
+            "sent": len(sent_entries),
+            "failed": len(bad_entries),
             "remaining": remaining,
             "subject": subject,
             "body": body,
             "used_fallback": used_fallback,
+            "warning": warning,
         }
     finally:
         _send_lock.release()

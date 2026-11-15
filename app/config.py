@@ -66,10 +66,12 @@ class Settings(BaseSettings):
     admin_passcode: str = ""
     gemini_api_key: str = ""
     gemini_model: str = "gemini-2.5-flash"
-    # Resend: from-address must be on a domain verified in Resend,
-    # e.g. "Fundry <hello@yourdomain.com>".
-    resend_api_key: str = ""
-    resend_from_email: str = ""
+    # Brevo transactional email API (HTTPS — Render's free tier blocks SMTP).
+    # BREVO_SENDER_EMAIL must be a sender verified in Brevo
+    # (Senders, Domains & Dedicated IPs > Senders).
+    brevo_api_key: str = ""
+    brevo_sender_email: str = ""
+    brevo_sender_name: str = "Fundry"
     launch_app_url: str = "https://fundry-inc.vercel.app"
 
     class Config:
