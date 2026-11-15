@@ -1,0 +1,2 @@
+ALTER TABLE waitlist_entries ADD COLUMN IF NOT EXISTS first_name VARCHAR;
+ALTER TABLE waitlist_entries ADD COLUMN IF NOT EXISTS company VARCHAR;

@@ -72,6 +72,8 @@ class Settings(BaseSettings):
     brevo_api_key: str = ""
     brevo_sender_email: str = ""
     brevo_sender_name: str = "Fundry"
+    x_url: str = "https://x.com/thefundryplc"
+    youtube_url: str = "https://youtube.com/@fundryspotlight"
     launch_app_url: str = "https://fundry-inc.vercel.app"
 
     class Config:

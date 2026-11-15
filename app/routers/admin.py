@@ -2,6 +2,7 @@ import hmac
 import html
 import json
 import logging
+import re
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -87,7 +88,9 @@ def waitlist_summary(db: Session = Depends(get_db)):
         db.query(func.count(WaitlistEntry.id)).filter(WaitlistEntry.launch_notified_at.isnot(None)).scalar() or 0
     )
     pending = total - notified
+    named = db.query(func.count(WaitlistEntry.id)).filter(WaitlistEntry.first_name.isnot(None)).scalar() or 0
     return {
+        "named": named,
         "total": total,
         "notified": notified,
         "pending": pending,
@@ -100,14 +103,14 @@ def waitlist_summary(db: Session = Depends(get_db)):
 
 # ---------------------------- Gemini drafting ----------------------------
 
-_FALLBACK_SUBJECT = "Fundry is live — your early access is here"
+_FALLBACK_SUBJECT = "Welcome to Fundry, we're live"
 _FALLBACK_BODY = (
-    "Hi there,\n\n"
-    "You joined our waitlist, and today we're excited to tell you: Fundry is officially live.\n\n"
-    "Fundry connects founders and investors directly — build your profile, discover the right people, "
-    "and start real conversations. As a waitlist member, you can create your account right now.\n\n"
-    "We can't wait to see what you build.\n\n"
-    "The Fundry Team"
+    "Welcome to Fundry! You joined our waitlist, and today we're excited to tell you that Fundry is officially live.\n\n"
+    "Whether you're a founder building something meaningful or an investor looking for the next big opportunity, "
+    "Fundry was built with people like you in mind. Your first step is to create your profile: choose Founder or "
+    "Investor, tell us a little about yourself, and follow the steps. This helps us connect you to the right "
+    "people, ideas and opportunities.\n\n"
+    "Next, stay updated on all our platforms using the buttons below. We can't wait to see what you bring to the table."
 )
 
 
@@ -122,13 +125,16 @@ def _draft_with_gemini() -> tuple[str, str, bool, str | None]:
         return _FALLBACK_SUBJECT, _FALLBACK_BODY, True, "GEMINI_API_KEY is not set on the server."
 
     prompt = (
-        "Write a launch announcement email from the Fundry team to people on our waitlist. "
+        "Write a welcome and launch announcement email from the Fundry team to people on our waitlist. "
         "Fundry is a platform that connects startup founders with investors (profiles, discovery, "
-        "connection requests, messaging). Tell them Fundry has launched and they can sign up now at "
-        f"{settings.launch_app_url}. Tone: warm, confident, concise, no hype or emojis. "
-        "Subject under 70 characters. Body 80-130 words, plain text, short paragraphs separated by "
-        "blank lines, start with 'Hi there,' and sign off 'The Fundry Team'. "
-        "Do not use placeholders or merge tags. Do not include the subject inside the body."
+        "connection requests, messaging). Tell them Fundry has launched. Speak to both founders and investors. "
+        "Say their first step is to create a profile, choose Founder or Investor as their category, tell us a "
+        "little about themselves, and follow the steps. Then say to follow Fundry on X and subscribe on YouTube "
+        "using the buttons below the email. Tone: warm, confident, concise, no hype. No emojis. "
+        "Subject under 70 characters. Body 80-120 words, plain text, short paragraphs separated by blank lines. "
+        "IMPORTANT: do NOT write a greeting line (it is added automatically per person), do NOT write a sign-off "
+        "or signature, do NOT include any URLs or links, and do not use placeholders or merge tags. "
+        "Start directly with the first paragraph. Do not include the subject inside the body."
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
@@ -175,19 +181,73 @@ def _draft_with_gemini() -> tuple[str, str, bool, str | None]:
     return _FALLBACK_SUBJECT, _FALLBACK_BODY, True, reason
 
 
-def _to_html(body: str) -> str:
-    paragraphs = "".join(
-        f'<p style="margin:0 0 16px;line-height:1.6">{html.escape(p).replace(chr(10), "<br>")}</p>'
-        for p in body.split("\n\n")
-        if p.strip()
+_GENERIC_NAMES = {
+    "info", "admin", "hello", "hi", "hey", "contact", "support", "team", "sales", "mail", "office", "help",
+    "noreply", "enquiries", "inquiries", "accounts", "billing", "founder", "ceo", "investor", "business",
+    "careers", "jobs", "press", "media", "studio", "test", "user", "email", "me",
+}
+
+
+def _first_name(entry: WaitlistEntry) -> str | None:
+    """Stored first name if we have one, else a cautious guess from the email
+    (only for patterns like first.last@ or first123@; otherwise None)."""
+    stored = (entry.first_name or "").strip()
+    if stored:
+        return stored.split()[0][:30].capitalize() if stored.islower() else stored.split()[0][:30]
+    m = re.match(r"^([a-z]{3,15})(?:[._\-+]|\d)", entry.email.split("@")[0].lower())
+    if m and m.group(1) not in _GENERIC_NAMES:
+        return m.group(1).capitalize()
+    return None
+
+
+def _greeting(entry: WaitlistEntry) -> str:
+    name = _first_name(entry)
+    return f"Hi {name}," if name else "Hi there,"
+
+
+def _company_line(entry: WaitlistEntry) -> str | None:
+    role = getattr(entry.role, "value", entry.role)
+    company = (entry.company or "").strip()
+    if role == "investor" and company:
+        return f"It's great to have {company} on the Fundry waitlist."
+    return None
+
+
+def _clean_body(body: str) -> str:
+    body = re.sub(r"^\s*(hi|hello|hey|dear)\b[^\n]*\n+", "", body.strip(), flags=re.I)
+    return re.sub(r"\n+\s*(best[^\n]*,|regards,|cheers,)?\s*(the )?fundry team\s*$", "", body, flags=re.I).strip()
+
+
+def _render_email(body: str, entry: WaitlistEntry) -> tuple[str, str]:
+    """Returns (html, plain_text) personalized for one recipient."""
+    paragraphs = [_greeting(entry)]
+    company = _company_line(entry)
+    if company:
+        paragraphs.append(company)
+    paragraphs += [p.strip() for p in _clean_body(body).split("\n\n") if p.strip()]
+
+    links = [
+        ("Open Fundry", settings.launch_app_url, "#2563eb"),
+        ("Follow us on X", settings.x_url, "#111111"),
+        ("Subscribe on YouTube", settings.youtube_url, "#dc2626"),
+    ]
+    text = "\n\n".join(paragraphs) + "\n\n" + "\n".join(f"{label}: {url}" for label, url, _ in links) + "\n\nThe Fundry Team"
+
+    body_html = "".join(
+        f'<p style="margin:0 0 16px;line-height:1.6">{html.escape(p).replace(chr(10), "<br>")}</p>' for p in paragraphs
     )
-    return (
+    buttons = "".join(
+        f'<a href="{html.escape(url)}" style="display:inline-block;margin:0 8px 10px 0;padding:12px 20px;'
+        f'background:{color};color:#ffffff;text-decoration:none;border-radius:8px;font-weight:600;font-size:15px">'
+        f"{html.escape(label)}</a>"
+        for label, url, color in links
+    )
+    html_out = (
         '<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#111;max-width:560px;margin:0 auto;padding:24px">'
-        f"{paragraphs}"
-        f'<p style="margin:24px 0"><a href="{html.escape(settings.launch_app_url)}" '
-        'style="background:#2563eb;color:#fff;text-decoration:none;padding:12px 22px;border-radius:8px;display:inline-block">'
-        "Open Fundry</a></p></div>"
+        f'{body_html}<div style="margin:24px 0 8px">{buttons}</div>'
+        '<p style="margin:16px 0 0;line-height:1.6">The Fundry Team</p></div>'
     )
+    return html_out, text
 
 
 class LaunchDraft(BaseModel):
@@ -197,10 +257,49 @@ class LaunchDraft(BaseModel):
 
 
 @router.post("/waitlist/preview-launch", dependencies=[Depends(require_admin)])
-def preview_launch_email():
+def preview_launch_email(db: Session = Depends(get_db)):
     """Drafts the email with Gemini without sending anything."""
     subject, body, used_fallback, reason = _draft_with_gemini()
-    return {"subject": subject, "body": body, "used_fallback": used_fallback, "fallback_reason": reason}
+    upcoming = (
+        db.query(WaitlistEntry)
+        .filter(WaitlistEntry.launch_notified_at.is_(None))
+        .order_by(WaitlistEntry.created_at.asc())
+        .limit(5)
+        .all()
+    )
+    return {
+        "subject": subject,
+        "body": _clean_body(body),
+        "used_fallback": used_fallback,
+        "fallback_reason": reason,
+        "samples": [{"email": e.email, "greeting": _greeting(e), "company": _company_line(e)} for e in upcoming],
+    }
+
+
+class ContactsUpload(BaseModel):
+    rows: str
+
+
+@router.post("/waitlist/contacts", dependencies=[Depends(require_admin)])
+def upload_contacts(payload: ContactsUpload, db: Session = Depends(get_db)):
+    """Fill in first names / company names. One person per line:
+    email, first name, company (company optional)."""
+    updated, not_found = 0, []
+    for line in payload.rows.splitlines():
+        parts = [x.strip() for x in re.split(r"[,\t;]", line)]
+        if len(parts) < 2 or "@" not in parts[0]:
+            continue
+        entry = db.query(WaitlistEntry).filter(func.lower(WaitlistEntry.email) == parts[0].lower()).first()
+        if not entry:
+            not_found.append(parts[0])
+            continue
+        if parts[1]:
+            entry.first_name = parts[1][:60]
+        if len(parts) > 2 and parts[2]:
+            entry.company = parts[2][:120]
+        updated += 1
+    db.commit()
+    return {"updated": updated, "not_found": not_found[:20]}
 
 
 # ------------------------------ Send launch ------------------------------
@@ -239,8 +338,6 @@ def send_launch_emails(payload: LaunchDraft | None = None, db: Session = Depends
             subject, body, used_fallback = payload.subject.strip()[:150], payload.body.strip()[:5000], payload.used_fallback
         else:
             subject, body, used_fallback, _ = _draft_with_gemini()
-        html_body = _to_html(body)
-
         sent_entries: list[WaitlistEntry] = []
         bad_entries: list[WaitlistEntry] = []
         warning: str | None = None
@@ -250,6 +347,7 @@ def send_launch_emails(payload: LaunchDraft | None = None, db: Session = Depends
 
         # One message per recipient so nobody sees anyone else's address.
         for e in entries:
+            html_body, text_body = _render_email(body, e)
             try:
                 r = session.post(
                     BREVO_URL,
@@ -258,7 +356,7 @@ def send_launch_emails(payload: LaunchDraft | None = None, db: Session = Depends
                         "to": [{"email": e.email}],
                         "subject": subject,
                         "htmlContent": html_body,
-                        "textContent": body,
+                        "textContent": text_body,
                     },
                     timeout=20,
                 )
