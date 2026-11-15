@@ -31,6 +31,8 @@ class WaitlistEntry(Base):
     email = Column(String, unique=True, index=True, nullable=False)
     role = Column(Enum(RoleEnum), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    # Set when the launch announcement email has been sent to this address.
+    launch_notified_at = Column(DateTime(timezone=True), nullable=True)
 
 
 class UserRoleEnum(str, enum.Enum):

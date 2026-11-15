@@ -61,6 +61,17 @@ class Settings(BaseSettings):
     frontend_billing_return_url: str = "https://fundry-inc.vercel.app/billing?billing=success"
     frontend_billing_cancel_url: str = "https://fundry-inc.vercel.app/billing?billing=cancelled"
 
+    # Admin console (app/routers/admin.py). Set ADMIN_PASSCODE in the Render
+    # dashboard — never commit it.
+    admin_passcode: str = ""
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-2.5-flash"
+    # Resend: from-address must be on a domain verified in Resend,
+    # e.g. "Fundry <hello@yourdomain.com>".
+    resend_api_key: str = ""
+    resend_from_email: str = ""
+    launch_app_url: str = "https://fundry-inc.vercel.app"
+
     class Config:
         env_file = ".env"
         # Field names above are lower_snake_case; environment variables are
