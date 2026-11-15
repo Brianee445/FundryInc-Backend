@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     brevo_api_key: str = ""
     brevo_sender_email: str = ""
     brevo_sender_name: str = "Fundry"
+    # Email sign-off (override with SIGNOFF_NAME / SIGNOFF_TITLE; empty name = no signature).
+    signoff_name: str = "Menekpugi Eunice Zorbari"
+    signoff_title: str = "CEO & Founder, Fundry"
     x_url: str = "https://x.com/thefundryplc"
     youtube_url: str = "https://youtube.com/@fundryspotlight"
     launch_app_url: str = "https://fundry-inc.vercel.app"

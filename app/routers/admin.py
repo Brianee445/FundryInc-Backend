@@ -188,16 +188,85 @@ _GENERIC_NAMES = {
 }
 
 
+_KNOWN_NAMES = frozenset(
+    """
+    james john robert michael william david richard joseph thomas charles daniel matthew anthony mark
+    donald steven paul andrew joshua kenneth kevin brian george edward ronald timothy jason jeffrey
+    ryan jacob gary nicholas eric jonathan stephen larry justin scott brandon benjamin samuel gregory
+    frank alexander raymond patrick jack dennis jerry tyler aaron jose adam henry nathan douglas
+    zachary peter kyle walter ethan jeremy harold keith christian roger noah gerald carl terry
+    sean austin arthur lawrence jesse dylan bryan joe jordan billy bruce albert willie gabriel
+    logan alan juan wayne roy ralph randy eugene vincent russell elijah louis bobby philip
+    johnny mary patricia jennifer linda elizabeth barbara susan jessica sarah karen nancy lisa betty
+    margaret sandra ashley kimberly emily donna michelle carol amanda dorothy melissa deborah stephanie rebecca
+    sharon laura cynthia kathleen amy angela shirley anna brenda pamela emma nicole helen samantha
+    katherine christine debra rachel carolyn janet catherine maria heather diane ruth julie olivia joyce
+    virginia victoria kelly lauren christina joan evelyn judith megan andrea cheryl hannah jacqueline martha
+    gloria teresa ann sara madison frances kathryn janice jean abigail alice julia judy sophia
+    grace denise amber doris marilyn danielle beverly isabella theresa diana natalie brittany charlotte marie
+    kayla alexis lori glory gloria favour favor blessing precious joy peace mercy faith hope
+    victor vicky vicki vickie wesley ede godwin godswill godfrey godson goodness grace destiny divine
+    daniel dan danny emeka chinedu ifeanyi ifeoma chioma ngozi obinna uche uchenna nnamdi nonso
+    kelechi chidi chika chiamaka chisom chukwuma chukwudi chukwuemeka chinonso chiderah amaka adaeze adanna nneka
+    nkechi ngozika onyeka onyinye ugochukwu ikenna ikechukwu kingsley kosi kosisochukwu somto somtochukwu tobenna tochukwu
+    tony tonye ade adebayo adewale adeola adesola adeyemi adetola ayo ayomide bola bolu bolanle
+    bukola bukky tunde tunji tolu tolulope toyin tomi tomiwa temi temitope femi folake funke
+    funmi funmilayo kemi kunle kayode kehinde taiwo yemi yemisi yinka yetunde wale wunmi segun
+    seun seyi shola sola soji sade shade dayo dare damilola damilare deji dele demola
+    ibukun ife ifeoluwa iyanu jide jumoke lanre lekan lola lade lara layo mide modupe
+    moyo niyi nike olamide olu oluwaseun oluwatobi oluwafemi oluwole oluwatosin olusegun olumide olaoluwa ola
+    olayinka olatunde ope opeyemi oyin oyinkansola rotimi remi rasheed sam samson sunday tobi tobiloba
+    tosin toluwani wumi yomi yusuf zainab ibrahim musa aisha fatima abdul abdullahi amina bashir
+    bello danjuma garba hadiza halima hassan hussaini ismail jamila khadija lawal maryam muhammad mohammed
+    ahmed ahmad mustapha nafisa rabi sadiq salisu sani shehu suleiman umar usman yakubu yahaya
+    zainab zubair ada ama kofi kwame kwabena kojo akua yaw efua nana abena kwesi
+    ekow esi chris christopher chrisben ben bennie benny alex alexa alexandra andy drew steve
+    steven mike mikey nick nicky matt jake josh sam sammy tom tommy tim timmy
+    ted teddy will willy billy bill bob bobby rob robbie rick ricky dave davy
+    jim jimmy joey jon johnny jan jen jenny jess jessie kate katie kathy liz
+    lizzy beth betty becky amy annie ally abby ellie emmy lucy lily luke leo
+    leon lewis liam mason max maxwell noel oscar owen ray reuben rose ruby sally
+    sophie stella tina tracy vera wendy zara zoe
+    """.split()
+)
+
+def _guess_name(local: str) -> str | None:
+    """Best-effort first name from the part of an email before the @.
+
+    - 'jane.doe' / 'brianee445'  -> the first delimited word (Jane, Brianee)
+    - 'glorywilly'               -> longest known first name it starts with (Glory)
+    - anything unrecognisable    -> None, so the email says 'Hi there,'
+    """
+    tokens = [t for t in re.split(r"[^a-z]+", local.lower()) if t]
+    if not tokens or len(tokens[0]) < 3:
+        return None
+    first = tokens[0]
+
+    if len(tokens) > 1 or first in _KNOWN_NAMES:
+        # 'jane.doe' (separator) or already a known name: take the word as is
+        candidate = first if len(first) <= 15 else None
+    else:
+        # one run of letters ('glorywilly'): longest known name it starts with,
+        # as long as what is left over is a plausible word (3+ letters)
+        candidate = None
+        for length in range(min(len(first) - 3, 12), 2, -1):
+            if first[:length] in _KNOWN_NAMES:
+                candidate = first[:length]
+                break
+        if candidate is None and len(first) <= 10:
+            candidate = first  # short unknown word, use as is
+    if not candidate or candidate in _GENERIC_NAMES:
+        return None
+    return candidate.capitalize()
+
+
 def _first_name(entry: WaitlistEntry) -> str | None:
-    """Stored first name if we have one, else a cautious guess from the email
-    (only for patterns like first.last@ or first123@; otherwise None)."""
+    """Stored first name (from the admin Names panel) wins; otherwise guess from the email."""
     stored = (entry.first_name or "").strip()
     if stored:
-        return stored.split()[0][:30].capitalize() if stored.islower() else stored.split()[0][:30]
-    m = re.match(r"^([a-z]{3,15})(?:[._\-+]|\d)", entry.email.split("@")[0].lower())
-    if m and m.group(1) not in _GENERIC_NAMES:
-        return m.group(1).capitalize()
-    return None
+        word = stored.split()[0][:30]
+        return word.capitalize() if word.islower() else word
+    return _guess_name(entry.email.split("@")[0])
 
 
 def _greeting(entry: WaitlistEntry) -> str:
@@ -231,7 +300,13 @@ def _render_email(body: str, entry: WaitlistEntry) -> tuple[str, str]:
         ("Follow us on X", settings.x_url, "#111111"),
         ("Subscribe on YouTube", settings.youtube_url, "#dc2626"),
     ]
-    text = "\n\n".join(paragraphs) + "\n\n" + "\n".join(f"{label}: {url}" for label, url, _ in links) + "\n\nThe Fundry Team"
+    signoff_lines = (
+        ["Warm regards,", settings.signoff_name, settings.signoff_title] if settings.signoff_name else []
+    )
+    signoff_lines = [x for x in signoff_lines if x]
+    text = "\n\n".join(paragraphs) + "\n\n" + "\n".join(f"{label}: {url}" for label, url, _ in links)
+    if signoff_lines:
+        text += "\n\n" + "\n".join(signoff_lines)
 
     body_html = "".join(
         f'<p style="margin:0 0 16px;line-height:1.6">{html.escape(p).replace(chr(10), "<br>")}</p>' for p in paragraphs
@@ -245,7 +320,14 @@ def _render_email(body: str, entry: WaitlistEntry) -> tuple[str, str]:
     html_out = (
         '<div style="font-family:Arial,Helvetica,sans-serif;font-size:16px;color:#111;max-width:560px;margin:0 auto;padding:24px">'
         f'{body_html}<div style="margin:24px 0 8px">{buttons}</div>'
-        '<p style="margin:16px 0 0;line-height:1.6">The Fundry Team</p></div>'
+        + (
+            '<p style="margin:16px 0 0;line-height:1.6">'
+            + "<br>".join(html.escape(x) for x in signoff_lines)
+            + "</p>"
+            if signoff_lines
+            else ""
+        )
+        + "</div>"
     )
     return html_out, text
 
@@ -264,10 +346,12 @@ def preview_launch_email(db: Session = Depends(get_db)):
         db.query(WaitlistEntry)
         .filter(WaitlistEntry.launch_notified_at.is_(None))
         .order_by(WaitlistEntry.created_at.asc())
-        .limit(5)
+        .limit(6)
         .all()
     )
     return {
+        "signoff_name": settings.signoff_name,
+        "signoff_title": settings.signoff_title,
         "subject": subject,
         "body": _clean_body(body),
         "used_fallback": used_fallback,
