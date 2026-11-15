@@ -169,6 +169,19 @@ def _to_html(body: str) -> str:
     )
 
 
+class LaunchDraft(BaseModel):
+    subject: str | None = None
+    body: str | None = None
+    used_fallback: bool = False
+
+
+@router.post("/waitlist/preview-launch", dependencies=[Depends(require_admin)])
+def preview_launch_email():
+    """Drafts the email with Gemini without sending anything."""
+    subject, body, used_fallback = _draft_with_gemini()
+    return {"subject": subject, "body": body, "used_fallback": used_fallback}
+
+
 # ------------------------------ Send launch ------------------------------
 # Sends through Brevo's HTTPS API (Render's free tier blocks SMTP ports).
 
@@ -183,7 +196,7 @@ def _brevo_error(r: requests.Response) -> str:
 
 
 @router.post("/waitlist/send-launch", dependencies=[Depends(require_admin)])
-def send_launch_emails(db: Session = Depends(get_db)):
+def send_launch_emails(payload: LaunchDraft | None = None, db: Session = Depends(get_db)):
     if not (settings.brevo_api_key and settings.brevo_sender_email):
         raise HTTPException(status_code=503, detail="Brevo is not configured (BREVO_API_KEY / BREVO_SENDER_EMAIL).")
 
@@ -200,7 +213,11 @@ def send_launch_emails(db: Session = Depends(get_db)):
         if not entries:
             raise HTTPException(status_code=404, detail="Everyone on the waitlist has already been notified.")
 
-        subject, body, used_fallback = _draft_with_gemini()
+        if payload and payload.subject and payload.body and len(payload.body.strip()) >= 40:
+            # Send exactly the draft the admin previewed.
+            subject, body, used_fallback = payload.subject.strip()[:150], payload.body.strip()[:5000], payload.used_fallback
+        else:
+            subject, body, used_fallback = _draft_with_gemini()
         html_body = _to_html(body)
 
         sent_entries: list[WaitlistEntry] = []
