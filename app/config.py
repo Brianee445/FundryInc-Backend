@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     # dashboard — never commit it.
     admin_passcode: str = ""
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.5-flash"
     # Brevo transactional email API (HTTPS — Render's free tier blocks SMTP).
     # BREVO_SENDER_EMAIL must be a sender verified in Brevo
     # (Senders, Domains & Dedicated IPs > Senders).

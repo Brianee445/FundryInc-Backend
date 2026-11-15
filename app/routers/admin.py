@@ -1,5 +1,7 @@
 import hmac
 import html
+import json
+import logging
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -109,10 +111,15 @@ _FALLBACK_BODY = (
 )
 
 
-def _draft_with_gemini() -> tuple[str, str, bool]:
-    """Returns (subject, plain_text_body, used_fallback)."""
+_log = logging.getLogger("uvicorn.error")
+# Tried in order if the configured model has been retired (404).
+_GEMINI_FALLBACK_MODELS = ["gemini-3.5-flash", "gemini-3.8-flash"]
+
+
+def _draft_with_gemini() -> tuple[str, str, bool, str | None]:
+    """Returns (subject, plain_text_body, used_fallback, fallback_reason)."""
     if not settings.gemini_api_key:
-        return _FALLBACK_SUBJECT, _FALLBACK_BODY, True
+        return _FALLBACK_SUBJECT, _FALLBACK_BODY, True, "GEMINI_API_KEY is not set on the server."
 
     prompt = (
         "Write a launch announcement email from the Fundry team to people on our waitlist. "
@@ -123,35 +130,49 @@ def _draft_with_gemini() -> tuple[str, str, bool]:
         "blank lines, start with 'Hi there,' and sign off 'The Fundry Team'. "
         "Do not use placeholders or merge tags. Do not include the subject inside the body."
     )
-    try:
-        resp = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{settings.gemini_model}:generateContent",
-            headers={"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"},
-            json={
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {
-                    "responseMimeType": "application/json",
-                    "responseSchema": {
-                        "type": "OBJECT",
-                        "properties": {"subject": {"type": "STRING"}, "body": {"type": "STRING"}},
-                        "required": ["subject", "body"],
-                    },
-                    "temperature": 0.7,
-                },
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "responseSchema": {
+                "type": "OBJECT",
+                "properties": {"subject": {"type": "STRING"}, "body": {"type": "STRING"}},
+                "required": ["subject", "body"],
             },
-            timeout=30,
-        )
-        resp.raise_for_status()
-        import json
+            "temperature": 0.7,
+        },
+    }
 
-        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        data = json.loads(text)
-        subject, body = str(data["subject"]).strip(), str(data["body"]).strip()
-        if not subject or len(body) < 40:
-            raise ValueError("empty draft")
-        return subject[:150], body, False
-    except Exception:
-        return _FALLBACK_SUBJECT, _FALLBACK_BODY, True
+    models = list(dict.fromkeys([settings.gemini_model, *_GEMINI_FALLBACK_MODELS]))
+    reason = "Unknown error"
+    for model in models:
+        try:
+            resp = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": settings.gemini_api_key, "Content-Type": "application/json"},
+                json=payload,
+                timeout=40,
+            )
+            if resp.status_code != 200:
+                try:
+                    detail = resp.json().get("error", {}).get("message", resp.text)
+                except ValueError:
+                    detail = resp.text
+                reason = f"{model}: HTTP {resp.status_code} - {str(detail)[:180]}"
+                _log.warning("Gemini draft failed: %s", reason)
+                if resp.status_code == 404:
+                    continue  # model retired/renamed: try the next one
+                break  # auth/quota/etc: other models won't help
+            data = json.loads(resp.json()["candidates"][0]["content"]["parts"][0]["text"])
+            subject, body = str(data["subject"]).strip(), str(data["body"]).strip()
+            if not subject or len(body) < 40:
+                raise ValueError("empty draft")
+            return subject[:150], body, False, None
+        except Exception as exc:  # noqa: BLE001
+            reason = f"{model}: {type(exc).__name__} - {str(exc)[:150]}"
+            _log.warning("Gemini draft failed: %s", reason)
+            break
+    return _FALLBACK_SUBJECT, _FALLBACK_BODY, True, reason
 
 
 def _to_html(body: str) -> str:
@@ -178,8 +199,8 @@ class LaunchDraft(BaseModel):
 @router.post("/waitlist/preview-launch", dependencies=[Depends(require_admin)])
 def preview_launch_email():
     """Drafts the email with Gemini without sending anything."""
-    subject, body, used_fallback = _draft_with_gemini()
-    return {"subject": subject, "body": body, "used_fallback": used_fallback}
+    subject, body, used_fallback, reason = _draft_with_gemini()
+    return {"subject": subject, "body": body, "used_fallback": used_fallback, "fallback_reason": reason}
 
 
 # ------------------------------ Send launch ------------------------------
@@ -217,7 +238,7 @@ def send_launch_emails(payload: LaunchDraft | None = None, db: Session = Depends
             # Send exactly the draft the admin previewed.
             subject, body, used_fallback = payload.subject.strip()[:150], payload.body.strip()[:5000], payload.used_fallback
         else:
-            subject, body, used_fallback = _draft_with_gemini()
+            subject, body, used_fallback, _ = _draft_with_gemini()
         html_body = _to_html(body)
 
         sent_entries: list[WaitlistEntry] = []
